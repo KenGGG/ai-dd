@@ -18,6 +18,60 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _normalize_source_title(title: str | None) -> str:
+    if not title:
+        return ""
+    normalized = title.strip().lower()
+    return normalized[:-4] if normalized.endswith(".pdf") else normalized
+
+
+def _candidate_source_titles(pdf_path: Path, manifest_record: dict[str, Any] | None = None) -> set[str]:
+    candidates = {
+        _normalize_source_title(pdf_path.name),
+        _normalize_source_title(pdf_path.stem),
+    }
+    if manifest_record:
+        title = str(manifest_record.get("title", "") or "")
+        if title:
+            candidates.add(_normalize_source_title(title))
+            candidates.add(_normalize_source_title(f"{title}.pdf"))
+        local_path = str(manifest_record.get("local_path", "") or "")
+        if local_path:
+            local_name = Path(local_path).name
+            candidates.add(_normalize_source_title(local_name))
+            candidates.add(_normalize_source_title(Path(local_name).stem))
+    return {candidate for candidate in candidates if candidate}
+
+
+def _source_to_dict(source: Any) -> dict[str, str]:
+    return {
+        "source_id": str(getattr(source, "id", "") or ""),
+        "source_title": str(getattr(source, "title", "") or ""),
+        "source_status": str(getattr(source, "status", "") or ""),
+    }
+
+
+def _find_existing_source(
+    existing_sources: list[Any],
+    pdf_path: Path,
+    manifest_record: dict[str, Any] | None = None,
+) -> dict[str, str] | None:
+    candidates = _candidate_source_titles(pdf_path, manifest_record)
+    for source in existing_sources:
+        source_title = _normalize_source_title(str(getattr(source, "title", "") or ""))
+        if source_title and source_title in candidates:
+            return _source_to_dict(source)
+    return None
+
+
+async def list_notebook_sources(client: Any, notebook_id: str) -> list[Any]:
+    try:
+        return await client.sources.list(notebook_id)
+    except Exception as e:
+        logger.warning("无法列出 NotebookLM 已有附件，将继续尝试上传: %s", e)
+        return []
+
+
 async def check_notebooklm_auth() -> bool:
     """
     检查 NotebookLM 登录状态。
@@ -120,6 +174,7 @@ async def upload_pdf_to_notebook(
     pdf_path: str | Path,
     wait_ready: bool = True,
     wait_timeout: float = 120.0,
+    manifest_record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     上传单个 PDF 到 NotebookLM 笔记。
@@ -140,6 +195,19 @@ async def upload_pdf_to_notebook(
 
     async with NotebookLMClient.from_storage() as client:
         try:
+            existing = _find_existing_source(
+                await list_notebook_sources(client, notebook_id),
+                pdf_path,
+                manifest_record,
+            )
+            if existing:
+                return {
+                    "status": "skipped_existing_source",
+                    "source_id": existing["source_id"],
+                    "source_title": existing["source_title"],
+                    "error_message": "",
+                }
+
             source = await client.sources.add_file(
                 notebook_id=notebook_id,
                 file_path=pdf_path,
@@ -189,6 +257,7 @@ async def upload_all_pdfs(
         return manifest_records
 
     async with NotebookLMClient.from_storage() as client:
+        existing_sources = await list_notebook_sources(client, notebook_id)
         for idx, rec in enumerate(to_upload):
             pdf_path = Path(rec["local_path"])
             if not pdf_path.exists():
@@ -198,6 +267,19 @@ async def upload_all_pdfs(
                 continue
 
             try:
+                existing = _find_existing_source(existing_sources, pdf_path, rec)
+                if existing:
+                    rec["upload_status"] = "skipped_existing_source"
+                    rec["source_id"] = existing["source_id"]
+                    rec["source_title"] = existing["source_title"]
+                    rec["ready_status"] = "ready"
+                    rec["notebook_id"] = notebook_id
+                    rec["error_message"] = ""
+                    logger.info(
+                        f"  [{idx+1}/{len(to_upload)}] ↪ 已存在，跳过上传: {pdf_path.name}"
+                    )
+                    continue
+
                 source = await client.sources.add_file(
                     notebook_id=notebook_id,
                     file_path=pdf_path,
@@ -206,9 +288,11 @@ async def upload_all_pdfs(
                 )
                 rec["upload_status"] = "uploaded"
                 rec["source_id"] = source.id
+                rec["source_title"] = pdf_path.name
                 rec["ready_status"] = "ready"
                 rec["notebook_id"] = notebook_id
                 rec["error_message"] = ""
+                existing_sources.append(source)
                 logger.info(f"  [{idx+1}/{len(to_upload)}] ✓ {pdf_path.name}")
             except Exception as e:
                 rec["upload_status"] = "upload_failed"
@@ -223,7 +307,7 @@ async def upload_all_pdfs(
 
     # 统计
     upload_statuses = [r.get("upload_status", "") for r in to_upload]
-    success = sum(1 for s in upload_statuses if s == "uploaded")
+    success = sum(1 for s in upload_statuses if s in ("uploaded", "skipped_existing_source"))
     failed = sum(1 for s in upload_statuses if s == "upload_failed")
     logger.info(f"上传完成: 成功 {success}, 失败 {failed}")
 
@@ -294,8 +378,9 @@ def run_upload(
 
     # 统计
     upload_statuses = [r.get("upload_status", "") for r in updated_records]
-    success = sum(1 for s in upload_statuses if s == "uploaded")
+    success = sum(1 for s in upload_statuses if s in ("uploaded", "skipped_existing_source"))
     failed = sum(1 for s in upload_statuses if s == "upload_failed")
+    skipped_existing = sum(1 for s in upload_statuses if s == "skipped_existing_source")
 
     return {
         "status": "completed",
@@ -304,5 +389,6 @@ def run_upload(
         "manifest_records": updated_records,
         "upload_success": success,
         "upload_failed": failed,
+        "upload_skipped_existing": skipped_existing,
         "error_message": "",
     }

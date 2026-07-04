@@ -68,6 +68,20 @@ export function useProjects() {
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(updatedProjects));
   };
 
+  const syncProjectFilesFromManifest = async (projectId: string) => {
+    const manifestData = await aiddaApi
+      .getManifest(projectId)
+      .catch(() => ({ records: [], total: 0 }));
+    const files = manifestRecordsToFiles(manifestData.records || []);
+    if (files.length === 0) return;
+
+    setProjects((current) => {
+      const next = current.map((p) => (p.id === projectId ? { ...p, files } : p));
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
   const syncProjectFromBackend = (project: any) => {
     if (!project) return;
     setProjects((current) => {
@@ -96,6 +110,7 @@ export function useProjects() {
       const data = await aiddaApi.getProjectStatus(projectId);
       const backendProject = data.status?.project;
       syncProjectFromBackend(backendProject);
+      await syncProjectFilesFromManifest(projectId);
       const uiProject = backendProjectToUi(backendProject);
       if (isDone(uiProject, data.status)) {
         return data.status;
@@ -187,7 +202,7 @@ export function useProjects() {
     saveProjects(updatedProjects);
   };
 
-  const handleAiddaDownloadAndUpload = async () => {
+  const handleAiddaDownloadAndUpload = async (excludeTitleKeywords: string[] = []) => {
     if (!activeProject) return;
     if (!activeProject.stockCode || !activeProject.notebookId) {
       alert("当前项目缺少股票代码或 NotebookLM 笔记 ID，请从项目管理中心重新创建。");
@@ -211,7 +226,7 @@ export function useProjects() {
     });
 
     try {
-      await aiddaApi.startDownloadAndUpload(activeProject);
+      await aiddaApi.startDownloadAndUpload(activeProject, excludeTitleKeywords);
 
       const finishedStatus = await pollProjectStatus(
         activeProject.id,
@@ -221,9 +236,10 @@ export function useProjects() {
         throw new Error(finishedStatus.project?.error || "公告下载或上传失败");
       }
 
-      const manifestData = await aiddaApi
-        .getManifest(activeProject.id)
-        .catch(() => ({ records: [], total: 0 }));
+      const manifestData = await aiddaApi.getManifest(activeProject.id).catch(() => ({
+        records: [],
+        total: 0,
+      }));
       const files = manifestRecordsToFiles(manifestData.records || []);
 
       setProjects((current) => {

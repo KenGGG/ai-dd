@@ -47,6 +47,7 @@ export const downloadAndUploadSchema = z.object({
   notebookId: z.string().optional(),
   periodicYears: z.number().optional().default(3),
   recentLimit: z.number().optional().default(200),
+  excludeTitleKeywords: z.array(z.string().trim().min(1)).optional().default([]),
 });
 
 export const composeReportSchema = z.object({

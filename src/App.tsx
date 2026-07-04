@@ -8,7 +8,9 @@ import { AppTab } from "./types";
 import { MobileHeader } from "./components/layout/MobileHeader";
 import { Sidebar } from "./components/layout/Sidebar";
 import { useNotebookLmAuth } from "./hooks/useNotebookLmAuth";
+import { useAnnouncementFilters } from "./hooks/useAnnouncementFilters";
 import { ProjectStatusFilter, useProjectDashboard } from "./hooks/useProjectDashboard";
+import { useNotebookSources } from "./hooks/useNotebookSources";
 import { useProjects } from "./hooks/useProjects";
 import { useQuestions } from "./hooks/useQuestions";
 import { useReportClipboard } from "./hooks/useReportClipboard";
@@ -17,8 +19,9 @@ import { Settings } from "./pages/Settings/Settings";
 import { EmptyWorkbenchState } from "./pages/Workbench/EmptyWorkbenchState";
 import { StepMeter } from "./pages/Workbench/StepMeter";
 import { WorkbenchHeader } from "./pages/Workbench/WorkbenchHeader";
-import { PdfPanel } from "./pages/Workbench/PdfPanel";
-import { ReportViewer } from "./pages/Workbench/ReportViewer";
+import { SourceAlignmentPage } from "./pages/Workbench/SourceAlignmentPage";
+import { ReportWorkspace } from "./pages/Workbench/ReportWorkspace";
+import { WorkbenchTabs, WorkbenchView } from "./pages/Workbench/WorkbenchTabs";
 
 export default function App() {
   // Navigation
@@ -27,6 +30,7 @@ export default function App() {
 
   // Workbench sub-navigation
   const [reportTab, setReportTab] = useState<"compiled" | "individual">("compiled");
+  const [workbenchView, setWorkbenchView] = useState<WorkbenchView>("sources");
 
   // Projects list filters
   const [projectSearchQuery, setProjectSearchQuery] = useState("");
@@ -52,8 +56,16 @@ export default function App() {
   } = useProjects();
 
   // NotebookLM authentication status
-  const { notebookLmAuth, notebookLmAuthMessage, handleCheckNotebookLmAuth } =
-    useNotebookLmAuth();
+  const { notebookLmAuth, notebookLmAuthMessage, handleCheckNotebookLmAuth } = useNotebookLmAuth();
+
+  const {
+    announcementFilterInput,
+    announcementFilterTerms,
+    handleAnnouncementFilterChange,
+    handleResetAnnouncementFilters,
+  } = useAnnouncementFilters();
+
+  useNotebookSources(activeProject);
 
   // Custom questions management
   const {
@@ -163,15 +175,19 @@ export default function App() {
 
                 <StepMeter activeProject={activeProject} />
 
-                <div className="flex-1 flex overflow-hidden min-h-0">
-                  <PdfPanel
+                <WorkbenchTabs currentView={workbenchView} onViewChange={setWorkbenchView} />
+
+                {workbenchView === "sources" ? (
+                  <SourceAlignmentPage
                     activeProject={activeProject}
                     isRunningAiddaDownload={isRunningAiddaDownload}
-                    onDownloadAndUpload={handleAiddaDownloadAndUpload}
+                    onDownloadAndUpload={() =>
+                      handleAiddaDownloadAndUpload(announcementFilterTerms)
+                    }
                     onDeleteFile={handleDeleteFile}
                   />
-
-                  <ReportViewer
+                ) : (
+                  <ReportWorkspace
                     activeProject={activeProject}
                     reportTab={reportTab}
                     selectedIndividualQId={selectedIndividualQId}
@@ -185,7 +201,7 @@ export default function App() {
                     onCopyModuleAnswer={handleCopyModuleAnswer}
                     onRetry={handleGenerateReport}
                   />
-                </div>
+                )}
               </div>
             )}
           </div>
@@ -207,6 +223,10 @@ export default function App() {
             onMoveQuestion={handleMoveQuestion}
             onResetQuestions={handleResetQuestions}
             onCheckNotebookLmAuth={handleCheckNotebookLmAuth}
+            announcementFilterInput={announcementFilterInput}
+            announcementFilterTerms={announcementFilterTerms}
+            onAnnouncementFilterChange={handleAnnouncementFilterChange}
+            onResetAnnouncementFilters={handleResetAnnouncementFilters}
           />
         )}
       </div>

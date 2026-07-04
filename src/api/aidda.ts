@@ -1,4 +1,4 @@
-import { Project, ProjectFile } from "../types";
+import { NotebookSource, Project, ProjectFile } from "../types";
 
 export interface AiddaBackendProject {
   id: string;
@@ -60,19 +60,33 @@ export function manifestRecordsToFiles(records: any[]): ProjectFile[] {
     downloadStatus:
       record.download_status === "downloaded" || record.download_status === "skipped_duplicate"
         ? ("completed" as const)
-        : ("failed" as const),
-    downloadProgress: record.download_status === "downloaded" ? 100 : 0,
+        : record.download_status === "pending"
+          ? ("pending" as const)
+          : ("failed" as const),
+    downloadProgress:
+      record.download_status === "downloaded" || record.download_status === "skipped_duplicate"
+        ? 100
+        : 0,
     downloadError: record.error_message,
     ticker: record.stock_code,
     uploadStatus:
       record.upload_status === "uploaded"
         ? ("uploaded" as const)
-        : record.upload_status === "upload_failed"
-          ? ("failed" as const)
-          : record.download_status === "skipped_duplicate"
-            ? ("skipped" as const)
-            : ("pending" as const),
+        : record.upload_status === "skipped_existing_source"
+          ? ("existing" as const)
+          : record.upload_status === "upload_failed"
+            ? ("failed" as const)
+            : record.download_status === "skipped_duplicate"
+              ? ("skipped" as const)
+              : ("pending" as const),
     sourceLayer: record.source_layer,
+    date: record.date,
+    announcementType: record.announcement_type,
+    localPath: record.local_path,
+    sha256: record.sha256,
+    sourceId: record.source_id,
+    sourceTitle: record.source_title,
+    readyStatus: record.ready_status,
   }));
 }
 
@@ -97,7 +111,7 @@ export const aiddaApi = {
     return requestJSON<{ status: any }>("/api/aidda/notebooklm/status");
   },
 
-  async startDownloadAndUpload(project: Project) {
+  async startDownloadAndUpload(project: Project, excludeTitleKeywords: string[] = []) {
     return requestJSON<{ message: string; jobId: number; project: AiddaBackendProject }>(
       `/api/aidda/projects/${project.id}/download-and-upload`,
       {
@@ -108,6 +122,7 @@ export const aiddaApi = {
           notebookId: project.notebookId,
           periodicYears: 3,
           recentLimit: 200,
+          excludeTitleKeywords,
         }),
       },
     );
@@ -137,6 +152,36 @@ export const aiddaApi = {
     return requestJSON<{ records: any[]; total: number }>(
       `/api/aidda/projects/${projectId}/manifest`,
     );
+  },
+
+  async getNotebookSources(projectId: string) {
+    const data = await requestJSON<{
+      status: string;
+      notebook_id: string;
+      sources: Array<{
+        source_id: string;
+        title: string;
+        kind: string;
+        status: string;
+        is_ready: boolean;
+      }>;
+      error_message?: string;
+    }>(`/api/aidda/projects/${projectId}/notebook-sources`);
+
+    return {
+      status: data.status,
+      notebookId: data.notebook_id,
+      sources: (data.sources || []).map(
+        (source): NotebookSource => ({
+          sourceId: source.source_id,
+          title: source.title,
+          kind: source.kind,
+          status: source.status,
+          isReady: source.is_ready,
+        }),
+      ),
+      errorMessage: data.error_message,
+    };
   },
 
   async getReport(projectId: string) {

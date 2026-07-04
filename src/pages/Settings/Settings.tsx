@@ -3,6 +3,7 @@ import { RefreshCw, Sliders } from "lucide-react";
 import { NotebookLmAuthState } from "../../hooks/useNotebookLmAuth";
 import { SystemQuestion } from "../../types";
 import { AddQuestionForm } from "./AddQuestionForm";
+import { AnnouncementFilterSettings } from "./AnnouncementFilterSettings";
 import { NotebookLmStatus } from "./NotebookLmStatus";
 import { QuestionList } from "./QuestionList";
 
@@ -20,6 +21,10 @@ interface SettingsProps {
   onMoveQuestion: (index: number, direction: "up" | "down") => void;
   onResetQuestions: () => void;
   onCheckNotebookLmAuth: () => void;
+  announcementFilterInput: string;
+  announcementFilterTerms: string[];
+  onAnnouncementFilterChange: (value: string) => void;
+  onResetAnnouncementFilters: () => void;
 }
 
 export function Settings({
@@ -36,6 +41,10 @@ export function Settings({
   onMoveQuestion,
   onResetQuestions,
   onCheckNotebookLmAuth,
+  announcementFilterInput,
+  announcementFilterTerms,
+  onAnnouncementFilterChange,
+  onResetAnnouncementFilters,
 }: SettingsProps) {
   return (
     <div className="flex-1 overflow-y-auto bg-slate-50 p-8 flex flex-col gap-6">
@@ -63,6 +72,13 @@ export function Settings({
         notebookLmAuth={notebookLmAuth}
         notebookLmAuthMessage={notebookLmAuthMessage}
         onCheckNotebookLmAuth={onCheckNotebookLmAuth}
+      />
+
+      <AnnouncementFilterSettings
+        announcementFilterInput={announcementFilterInput}
+        announcementFilterTerms={announcementFilterTerms}
+        onAnnouncementFilterChange={onAnnouncementFilterChange}
+        onResetAnnouncementFilters={onResetAnnouncementFilters}
       />
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">

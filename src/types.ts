@@ -15,8 +15,23 @@ export interface ProjectFile {
   downloadProgress?: number; // 0-100
   downloadError?: string;
   ticker?: string; // associated stock ticker if any
-  uploadStatus?: "pending" | "uploaded" | "failed" | "skipped";
+  uploadStatus?: "pending" | "uploaded" | "failed" | "skipped" | "existing";
   sourceLayer?: "periodic_report_3y" | "recent_200" | "both";
+  date?: string;
+  announcementType?: string;
+  localPath?: string;
+  sha256?: string;
+  sourceId?: string;
+  sourceTitle?: string;
+  readyStatus?: string;
+}
+
+export interface NotebookSource {
+  sourceId: string;
+  title: string;
+  kind: string;
+  status: string;
+  isReady: boolean;
 }
 
 export interface QuestionAnswer {

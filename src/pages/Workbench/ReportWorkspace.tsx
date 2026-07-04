@@ -1,6 +1,11 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * ReportWorkspace — 分次提问与报告页。
+ *
+ * 专注处理 NotebookLM 逐轮提问、每轮答案、最终报告展示。
+ * 从 ReportViewer 中提取出纯报告工作区，去掉 PDF 下载/上传相关状态。
  */
 
 import {
@@ -19,7 +24,7 @@ import {
 import { Project } from "../../types";
 import MarkdownRenderer from "../../components/MarkdownRenderer";
 
-interface ReportViewerProps {
+interface ReportWorkspaceProps {
   activeProject: Project;
   reportTab: "compiled" | "individual";
   selectedIndividualQId: string | null;
@@ -34,7 +39,7 @@ interface ReportViewerProps {
   onRetry: () => void;
 }
 
-export function ReportViewer({
+export function ReportWorkspace({
   activeProject,
   reportTab,
   selectedIndividualQId,
@@ -47,128 +52,8 @@ export function ReportViewer({
   onDownloadMarkdown,
   onCopyModuleAnswer,
   onRetry,
-}: ReportViewerProps) {
-  // Download/upload progress state
-  if (activeProject.status === "downloading" || activeProject.status === "uploading") {
-    return (
-      <div className="flex-1 p-8 overflow-y-auto flex items-center justify-center select-none">
-        <div className="max-w-md w-full bg-white border border-slate-200 rounded-2xl p-8 text-center shadow-xs flex flex-col items-center gap-4">
-          <div className="w-12 h-12 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center">
-            <Loader2 className="h-6 w-6 text-blue-600 animate-spin" />
-          </div>
-          <div>
-            <h3 className="text-base font-extrabold text-slate-800">
-              正在下载巨潮公告并同步上传 NotebookLM
-            </h3>
-            <p className="text-xs text-slate-500 leading-relaxed mt-1">
-              系统会先处理近三年定期报告，再处理最近 200 个公告；每个 PDF
-              下载成功后立即上传到当前项目的 NotebookLM 笔记。
-            </p>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // Empty state: files loaded, ready to generate
-  if (activeProject.files.length > 0 && activeProject.status === "idle") {
-    return (
-      <div className="flex-1 p-8 overflow-y-auto flex items-center justify-center select-none">
-        <div className="max-w-md w-full bg-white border border-slate-200 rounded-2xl p-8 text-center shadow-xs flex flex-col items-center gap-4">
-          <div className="w-12 h-12 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
-            <Sparkles className="h-6 w-6 text-indigo-600 animate-pulse" />
-          </div>
-
-          <div>
-            <h3 className="text-base font-extrabold text-slate-800">
-              标的知识库储备已就绪，等待计算
-            </h3>
-            <p className="text-xs text-slate-500 leading-relaxed mt-1">
-              当前已载入{" "}
-              <strong className="text-indigo-600 font-bold">{activeProject.files.length} 份</strong>{" "}
-              公告年报。 系统将按{" "}
-              <strong className="text-indigo-600 font-bold">templates/question_rounds.json</strong>
-              的 10 轮问题逐个向 NotebookLM 提问，并合并所有答案形成最终报告。
-            </p>
-          </div>
-
-          <div className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-left">
-            <span className="text-[9px] uppercase font-extrabold text-slate-400 block mb-1">
-              即将执行的 NotebookLM 任务:
-            </span>
-            <ul className="space-y-1">
-              {[
-                "资料目录与可填列范围识别",
-                "商业模式与大客户分析",
-                "核心财务指标诊断",
-                "合规与司法风险排查",
-                "股权结构与实际控制人",
-                "募集资金与募投项目",
-                "行业与竞争格局分析",
-                "关联交易与独立性分析",
-                "董监高与公司治理",
-                "尽调综合结论与风险提示",
-              ].map((title, idx) => (
-                <li
-                  key={title}
-                  className="text-xs font-semibold text-slate-700 flex items-center gap-1.5"
-                >
-                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 shrink-0" />
-                  <span>
-                    {idx + 1}. {title}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          <button
-            onClick={onGenerateReport}
-            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-xs py-3 px-4 rounded-xl flex items-center justify-center gap-1.5 shadow-md shadow-blue-600/10 transition-all active:scale-98 cursor-pointer"
-          >
-            <Play className="h-4 w-4" />
-            <span>生成报告：逐轮提问并汇编</span>
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // Failed state with error
-  if (activeProject.status === "failed" && activeProject.error) {
-    return (
-      <div className="flex-1 p-8 overflow-y-auto flex items-center justify-center select-none">
-        <div className="max-w-md w-full bg-rose-50 border border-rose-100 rounded-2xl p-8 text-center shadow-xs flex flex-col items-center gap-4">
-          <div className="w-12 h-12 rounded-xl bg-rose-100 text-rose-600 flex items-center justify-center">
-            <AlertTriangle className="h-6 w-6 text-rose-600" />
-          </div>
-
-          <div>
-            <h3 className="text-sm font-black text-rose-800">AIDDA 流程异常中断</h3>
-            <p className="text-xs text-rose-600 font-medium leading-relaxed mt-1.5">
-              {activeProject.error}
-            </p>
-          </div>
-
-          <div className="w-full bg-white border border-rose-100 rounded-xl p-3 text-left text-xs font-medium text-slate-500 space-y-2">
-            <p className="font-extrabold text-slate-800">处理建议：</p>
-            <p>1. 请确认 NotebookLM 已登录，并执行过 notebooklm auth check --test。</p>
-            <p>2. 请确认项目已完成公告 PDF 下载和 NotebookLM 上传。</p>
-          </div>
-
-          <button
-            onClick={onRetry}
-            className="w-full bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-xs py-2.5 px-4 rounded-xl flex items-center justify-center gap-1.5 shadow-sm transition-all cursor-pointer"
-          >
-            <Loader2 className="h-4 w-4 animate-spin" />
-            <span>重新尝试连接并重算</span>
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // Report output when generating or completed
+}: ReportWorkspaceProps) {
+  // Running states (parsing/querying/synthesizing) — show report in progress
   if (activeProject.status !== "idle" && activeProject.reports) {
     return (
       <div className="flex-1 flex flex-col overflow-hidden min-h-0">
@@ -206,7 +91,6 @@ export function ReportViewer({
             })}
           </div>
 
-          {/* Export and copy controllers if done */}
           {activeProject.status === "completed" && (
             <div className="flex items-center gap-2 shrink-0">
               <button
@@ -231,7 +115,7 @@ export function ReportViewer({
           )}
         </div>
 
-        {/* Split output subtabs */}
+        {/* Tab toggle */}
         <div className="bg-white border-b border-slate-100 px-6 py-2 flex items-center justify-between shrink-0 select-none text-xs font-bold">
           <div className="flex bg-slate-100 p-0.5 rounded-lg">
             <button
@@ -261,7 +145,7 @@ export function ReportViewer({
           </div>
         </div>
 
-        {/* Tab A: Full Compiled Report */}
+        {/* Tab A: Compiled Report */}
         {reportTab === "compiled" && (
           <div className="flex-1 overflow-y-auto p-8 min-h-0 bg-white">
             {activeProject.status === "parsing" && (
@@ -308,10 +192,9 @@ export function ReportViewer({
           </div>
         )}
 
-        {/* Tab B: Individual Module Card view */}
+        {/* Tab B: Individual Answers */}
         {reportTab === "individual" && (
           <div className="flex-1 overflow-hidden flex min-h-0">
-            {/* Left: Question titles list */}
             <div className="w-60 bg-white border-r border-slate-200 shrink-0 overflow-y-auto p-3 space-y-1 select-none">
               <span className="text-[9px] uppercase font-extrabold text-slate-400 block px-2.5 py-1">
                 选择审查维度
@@ -348,7 +231,6 @@ export function ReportViewer({
               })}
             </div>
 
-            {/* Right: Answer display */}
             <div className="flex-1 overflow-y-auto bg-white p-8 min-h-0">
               {(() => {
                 const ans = activeProject.reports.answers.find(
@@ -411,7 +293,6 @@ export function ReportViewer({
                           Prompt 指令: {ans.prompt}
                         </p>
                       </div>
-
                       <button
                         onClick={() => onCopyModuleAnswer(ans.questionId, ans.answer)}
                         className="bg-white hover:bg-slate-100 border border-slate-200 hover:border-slate-300 text-slate-700 font-extrabold text-[10px] px-2.5 py-1.5 rounded-lg flex items-center gap-1 shrink-0 transition-colors cursor-pointer"
@@ -427,7 +308,6 @@ export function ReportViewer({
                         </span>
                       </button>
                     </div>
-
                     <div className="border-t border-slate-100 pt-4">
                       <MarkdownRenderer content={ans.answer} />
                     </div>
@@ -441,7 +321,101 @@ export function ReportViewer({
     );
   }
 
-  // Fallback empty state (no files yet)
+  // Failed state
+  if (activeProject.status === "failed" && activeProject.error) {
+    return (
+      <div className="flex-1 p-8 overflow-y-auto flex items-center justify-center select-none">
+        <div className="max-w-md w-full bg-rose-50 border border-rose-100 rounded-2xl p-8 text-center shadow-xs flex flex-col items-center gap-4">
+          <div className="w-12 h-12 rounded-xl bg-rose-100 text-rose-600 flex items-center justify-center">
+            <AlertTriangle className="h-6 w-6 text-rose-600" />
+          </div>
+          <div>
+            <h3 className="text-sm font-black text-rose-800">AIDDA 流程异常中断</h3>
+            <p className="text-xs text-rose-600 font-medium leading-relaxed mt-1.5">
+              {activeProject.error}
+            </p>
+          </div>
+          <div className="w-full bg-white border border-rose-100 rounded-xl p-3 text-left text-xs font-medium text-slate-500 space-y-2">
+            <p className="font-extrabold text-slate-800">处理建议：</p>
+            <p>1. 请确认 NotebookLM 已登录，并执行过 notebooklm auth check --test。</p>
+            <p>2. 请确认项目已完成公告 PDF 下载和 NotebookLM 上传。</p>
+          </div>
+          <button
+            onClick={onRetry}
+            className="w-full bg-rose-600 hover:bg-rose-700 text-white font-extrabold text-xs py-2.5 px-4 rounded-xl flex items-center justify-center gap-1.5 shadow-sm transition-all cursor-pointer"
+          >
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <span>重新尝试连接并重算</span>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Idle state with files = ready to generate
+  if (activeProject.files.length > 0 && activeProject.status === "idle") {
+    return (
+      <div className="flex-1 p-8 overflow-y-auto flex items-center justify-center select-none">
+        <div className="max-w-md w-full bg-white border border-slate-200 rounded-2xl p-8 text-center shadow-xs flex flex-col items-center gap-4">
+          <div className="w-12 h-12 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
+            <Sparkles className="h-6 w-6 text-indigo-600 animate-pulse" />
+          </div>
+          <div>
+            <h3 className="text-base font-extrabold text-slate-800">
+              标的知识库储备已就绪，等待计算
+            </h3>
+            <p className="text-xs text-slate-500 leading-relaxed mt-1">
+              当前已载入{" "}
+              <strong className="text-indigo-600 font-bold">
+                {activeProject.files.length} 份
+              </strong>{" "}
+              公告年报。系统将按 10 轮问题逐个向 NotebookLM 提问，并合并所有答案形成最终报告。
+            </p>
+          </div>
+
+          <div className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-left">
+            <span className="text-[9px] uppercase font-extrabold text-slate-400 block mb-1">
+              即将执行的 NotebookLM 任务:
+            </span>
+            <ul className="space-y-1">
+              {[
+                "资料目录与可填列范围识别",
+                "商业模式与大客户分析",
+                "核心财务指标诊断",
+                "合规与司法风险排查",
+                "股权结构与实际控制人",
+                "募集资金与募投项目",
+                "行业与竞争格局分析",
+                "关联交易与独立性分析",
+                "董监高与公司治理",
+                "尽调综合结论与风险提示",
+              ].map((title, idx) => (
+                <li
+                  key={title}
+                  className="text-xs font-semibold text-slate-700 flex items-center gap-1.5"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 shrink-0" />
+                  <span>
+                    {idx + 1}. {title}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <button
+            onClick={onGenerateReport}
+            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-xs py-3 px-4 rounded-xl flex items-center justify-center gap-1.5 shadow-md shadow-blue-600/10 transition-all active:scale-98 cursor-pointer"
+          >
+            <Play className="h-4 w-4" />
+            <span>生成报告：逐轮提问并汇编</span>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Fallback: no files yet, need to download first
   return (
     <div className="flex-1 p-8 overflow-y-auto flex items-center justify-center select-none">
       <div className="max-w-md w-full bg-white border border-slate-200 rounded-2xl p-8 text-center shadow-xs flex flex-col items-center gap-4">
@@ -451,7 +425,7 @@ export function ReportViewer({
         <div>
           <h3 className="text-base font-extrabold text-slate-800">尽调报告工作台</h3>
           <p className="text-xs text-slate-500 leading-relaxed mt-1">
-            请先在左侧面板下载公告 PDF 并上传，然后在此生成报告。
+            请先在「公告 PDF 对齐」页下载公告 PDF 并上传到 NotebookLM，然后在此生成报告。
           </p>
         </div>
       </div>

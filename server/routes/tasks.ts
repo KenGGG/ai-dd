@@ -45,11 +45,13 @@ tasksRouter.post(
         notebookId = project.notebookId,
         periodicYears = 3,
         recentLimit = 200,
+        excludeTitleKeywords = [],
       } = req.body as {
         stockCode?: string;
         notebookId?: string;
         periodicYears?: number;
         recentLimit?: number;
+        excludeTitleKeywords?: string[];
       };
 
       if (!stockCode || !notebookId) {
@@ -67,6 +69,8 @@ tasksRouter.post(
         String(periodicYears),
         "--recent-limit",
         String(recentLimit),
+        "--exclude-title-keywords",
+        excludeTitleKeywords.join("\n"),
         "--wait-ready",
       ])
         .then(({ stdout }) => {
@@ -76,7 +80,8 @@ tasksRouter.post(
             currentStep: 1,
             manifestPath: typeof summary?.manifest_path === "string" ? summary.manifest_path : "",
             pdfDir: typeof summary?.pdf_dir === "string" ? summary.pdf_dir : "",
-            downloadSuccess: typeof summary?.download_success === "number" ? summary.download_success : 0,
+            downloadSuccess:
+              typeof summary?.download_success === "number" ? summary.download_success : 0,
             uploadSuccess: typeof summary?.upload_success === "number" ? summary.upload_success : 0,
             error: null,
           });
@@ -170,7 +175,9 @@ tasksRouter.post(
           finishJob(jobId, "failed", "", message);
         });
 
-      res.status(202).json({ message: "报告生成任务已启动", jobId, project: getProject(project.id) });
+      res
+        .status(202)
+        .json({ message: "报告生成任务已启动", jobId, project: getProject(project.id) });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "报告生成失败";
       updateProject(project.id, { status: "failed", error: message });

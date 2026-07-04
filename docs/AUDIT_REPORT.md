@@ -34,18 +34,18 @@ AIDDA Workbench 已从前端 demo 形态推进为本地全栈应用：
 
 ## 仍需继续完善
 
-| 项目                      | 优先级 | 说明                                                                                 |
-| ------------------------- | -----: | ------------------------------------------------------------------------------------ |
-| 端到端小样本验收          |     P0 | 需要用真实 NotebookLM 登录态跑完创建项目、下载上传、生成报告                         |
-| 前端上帝组件拆分          |     P0 | 已启动拆分；`src/App.tsx` 仍有约 1169 行，下一步应继续拆 Workbench 的 PDF / 报告区域 |
-| 实时进度推送              |     P1 | 当前为轮询，尚未把 Python stdout 转成逐条 PDF 进度                                   |
-| manifest / 答案文件查看器 |     P1 | 当前只在完成后汇总展示，缺少逐条复核视图                                             |
-| 数据库迁移版本表          |     P1 | 当前为 `CREATE TABLE IF NOT EXISTS`，后续 schema 演进应引入 migrations               |
-| 后端路由拆分              |     P1 | `server/routes/aidda.ts` 已接近 300 行，应拆分 project/job/notebooklm/artifact 路由  |
-| 后台任务队列              |     P2 | 当前长任务为进程内后台 Promise，服务重启后可标记中断但不能自动续跑                   |
-| E2E/UI 自动化             |     P2 | 当前覆盖后端单元测试，缺少浏览器工作流测试                                           |
-| Python ruff 门禁          |     P2 | 已有 `pyproject.toml` 和 `requirements-dev.txt`，尚未接入默认 CI                     |
-| Word 报告导出             |     P3 | 当前仅输出 Markdown                                                                  |
+| 项目                      | 优先级 | 说明                                                                                |
+| ------------------------- | -----: | ----------------------------------------------------------------------------------- |
+| 端到端小样本验收          |     P0 | 需要用真实 NotebookLM 登录态跑完创建项目、下载上传、生成报告                        |
+| 前端上帝组件拆分          |     P0 | `src/App.tsx` 已降至约 227 行；下一步应拆 `ReportViewer` 与 `useProjects`           |
+| 实时进度推送              |     P1 | 当前通过轮询 manifest 刷新逐条状态，尚未升级为 SSE / WebSocket                      |
+| manifest / 答案文件查看器 |     P1 | 工作台已有公告资料关系矩阵；答案文件仍缺少逐条复核视图                              |
+| 数据库迁移版本表          |     P1 | 当前为 `CREATE TABLE IF NOT EXISTS`，后续 schema 演进应引入 migrations              |
+| 后端路由拆分              |     P1 | `server/routes/aidda.ts` 已接近 300 行，应拆分 project/job/notebooklm/artifact 路由 |
+| 后台任务队列              |     P2 | 当前长任务为进程内后台 Promise，服务重启后可标记中断但不能自动续跑                  |
+| E2E/UI 自动化             |     P2 | 当前覆盖后端单元测试，缺少浏览器工作流测试                                          |
+| Python ruff 门禁          |     P2 | 已有 `pyproject.toml` 和 `requirements-dev.txt`，尚未接入默认 CI                    |
+| Word 报告导出             |     P3 | 当前仅输出 Markdown                                                                 |
 
 ## 验证命令
 

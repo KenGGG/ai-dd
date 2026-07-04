@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--notebook-id", required=True)
     parser.add_argument("--periodic-years", type=int, default=3)
     parser.add_argument("--recent-limit", type=int, default=200)
+    parser.add_argument("--exclude-title-keywords", default="")
     parser.add_argument("--out-dir", default="data")
     parser.add_argument("--wait-ready", action="store_true", default=True)
     return parser.parse_args()
@@ -63,6 +64,21 @@ def _dedupe_key(item: dict) -> tuple[str, str]:
     return item.get("announcement_id", "") or "", item.get("adjunct_url", "") or ""
 
 
+def _parse_filter_terms(raw_terms: str) -> list[str]:
+    terms: list[str] = []
+    for line in raw_terms.replace("，", ",").splitlines():
+        terms.extend(part.strip() for part in line.split(",") if part.strip())
+    return terms
+
+
+def _matched_filter(title: str, filter_terms: list[str]) -> str:
+    normalized = title.lower()
+    for term in filter_terms:
+        if term.lower() in normalized:
+            return term
+    return ""
+
+
 def main() -> None:
     args = parse_args()
     raw_code = normalize_stock_code(args.stock_code)
@@ -77,6 +93,7 @@ def main() -> None:
     seen_ids: set[str] = set()
     seen_urls: set[str] = set()
     seen_sha: set[str] = set()
+    filter_terms = _parse_filter_terms(args.exclude_title_keywords)
 
     logger.info("第一阶段：检索近三年定期报告")
     periodic_anns = cninfo_list_all(
@@ -102,6 +119,8 @@ def main() -> None:
     )
     recent_items = recent_anns[:args.recent_limit]
     logger.info("最近公告数量：%s", len(recent_items))
+    if filter_terms:
+        logger.info("公告标题过滤词：%s", "、".join(filter_terms))
 
     stages = [
         ("periodic_report_3y", periodic_items),
@@ -112,6 +131,23 @@ def main() -> None:
         logger.info("开始处理资料池：%s", source_layer)
         for idx, item in enumerate(items):
             ann_id, url = _dedupe_key(item)
+            matched_term = _matched_filter(item.get("title", ""), filter_terms)
+            if matched_term:
+                rec = {
+                    "announcement_id": ann_id,
+                    "title": item.get("title", ""),
+                    "date": item.get("date", ""),
+                    "adjunct_url": url,
+                    "local_path": "",
+                    "sha256": "",
+                    "download_status": "skipped_filter",
+                    "upload_status": "skipped",
+                    "error_message": f"命中过滤词：{matched_term}",
+                }
+                records.append(_base_record(item, rec, raw_code, args.project_id, source_layer))
+                _write_manifest(manifest_path, records)
+                continue
+
             if (ann_id and ann_id in seen_ids) or (url and url in seen_urls):
                 rec = {
                     "announcement_id": ann_id,
@@ -149,11 +185,17 @@ def main() -> None:
                         notebook_id=args.notebook_id,
                         pdf_path=rec["local_path"],
                         wait_ready=args.wait_ready,
+                        manifest_record=rec,
                     )
                 )
                 rec["upload_status"] = upload_result.get("status", "")
                 rec["source_id"] = upload_result.get("source_id", "")
-                rec["ready_status"] = "ready" if upload_result.get("status") == "uploaded" else ""
+                rec["source_title"] = upload_result.get("source_title", "")
+                rec["ready_status"] = (
+                    "ready"
+                    if upload_result.get("status") in ("uploaded", "skipped_existing_source")
+                    else ""
+                )
                 rec["notebook_id"] = args.notebook_id
                 if upload_result.get("error_message"):
                     rec["error_message"] = upload_result["error_message"]
@@ -174,8 +216,9 @@ def main() -> None:
         "download_success": sum(1 for s in statuses if s == "downloaded"),
         "download_failed": sum(1 for s in statuses if s.startswith("download_failed") or s == "failed"),
         "skipped_duplicate": sum(1 for s in statuses if s == "skipped_duplicate"),
-        "upload_success": sum(1 for s in upload_statuses if s == "uploaded"),
+        "upload_success": sum(1 for s in upload_statuses if s in ("uploaded", "skipped_existing_source")),
         "upload_failed": sum(1 for s in upload_statuses if s == "upload_failed"),
+        "upload_skipped_existing": sum(1 for s in upload_statuses if s == "skipped_existing_source"),
         "manifest_path": str(manifest_path),
         "pdf_dir": str(pdf_dir),
         "notebook_id": args.notebook_id,

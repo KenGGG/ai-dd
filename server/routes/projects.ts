@@ -7,12 +7,7 @@ import { Router, Request, Response } from "express";
 import fs from "fs";
 import path from "path";
 import { DATA_DIR } from "../db.ts";
-import {
-  deleteProject,
-  getProject,
-  listProjects,
-  upsertProject,
-} from "../db.ts";
+import { deleteProject, getProject, listProjects, upsertProject } from "../db.ts";
 import { parseLastJSON, runPythonScript } from "../python.ts";
 import { AppError, asyncHandler } from "../middleware/error-handler.ts";
 import { createProjectSchema, validate } from "../middleware/validate.ts";
@@ -44,40 +39,44 @@ projectsRouter.delete("/projects/:id", (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
-projectsRouter.post("/projects", validate({ body: createProjectSchema }), asyncHandler(async (req: Request, res: Response) => {
-  const { stockCode, projectName, stockName } = req.body as {
-    stockCode: string;
-    projectName: string;
-    stockName: string;
-  };
+projectsRouter.post(
+  "/projects",
+  validate({ body: createProjectSchema }),
+  asyncHandler(async (req: Request, res: Response) => {
+    const { stockCode, projectName, stockName } = req.body as {
+      stockCode: string;
+      projectName: string;
+      stockName: string;
+    };
 
-  const { stdout } = await runPythonScript("notebooklm_create_project.py", [
-    "--stock-code",
-    stockCode,
-    "--project-name",
-    projectName,
-    "--stock-name",
-    stockName,
-  ]);
-  const payload = parseLastJSON(stdout);
-  if (!payload) {
-    throw new AppError("项目创建输出无法解析", 500, "PARSE_ERROR");
-  }
+    const { stdout } = await runPythonScript("notebooklm_create_project.py", [
+      "--stock-code",
+      stockCode,
+      "--project-name",
+      projectName,
+      "--stock-name",
+      stockName,
+    ]);
+    const payload = parseLastJSON(stdout);
+    if (!payload) {
+      throw new AppError("项目创建输出无法解析", 500, "PARSE_ERROR");
+    }
 
-  const project = upsertProject({
-    id: payload.project_id as string,
-    name: payload.project_name as string,
-    stockCode: payload.stock_code as string,
-    stockName: payload.stock_name as string,
-    notebookId: payload.notebook_id as string,
-    notebookTitle: payload.notebook_title as string,
-    status: "idle",
-    currentStep: 0,
-    meta: { source: "notebooklm_create_project.py" },
-  });
+    const project = upsertProject({
+      id: payload.project_id as string,
+      name: payload.project_name as string,
+      stockCode: payload.stock_code as string,
+      stockName: payload.stock_name as string,
+      notebookId: payload.notebook_id as string,
+      notebookTitle: payload.notebook_title as string,
+      status: "idle",
+      currentStep: 0,
+      meta: { source: "notebooklm_create_project.py" },
+    });
 
-  res.json({ project: payload, record: project, output: stdout });
-}));
+    res.json({ project: payload, record: project, output: stdout });
+  }),
+);
 
 // Project status endpoint
 projectsRouter.get("/projects/:id/status", (req: Request, res: Response) => {
@@ -149,6 +148,29 @@ projectsRouter.get("/projects/:id/manifest", (req: Request, res: Response) => {
   const records = lines.map((line) => JSON.parse(line));
   res.json({ records, total: records.length });
 });
+
+projectsRouter.get(
+  "/projects/:id/notebook-sources",
+  asyncHandler(async (req: Request, res: Response) => {
+    const project = getProject(req.params.id);
+    if (!project) {
+      throw new AppError("项目不存在", 404);
+    }
+    if (!project.notebookId) {
+      throw new AppError("项目未绑定 NotebookLM 笔记", 400);
+    }
+
+    const { stdout } = await runPythonScript("notebooklm_list_sources.py", [
+      "--notebook-id",
+      project.notebookId,
+    ]);
+    const payload = parseLastJSON(stdout);
+    if (!payload) {
+      throw new AppError("NotebookLM sources 输出无法解析", 500, "PARSE_ERROR");
+    }
+    res.json(payload);
+  }),
+);
 
 // Report endpoint
 projectsRouter.get("/projects/:id/report", (req: Request, res: Response) => {
