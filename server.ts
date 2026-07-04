@@ -3,6 +3,7 @@ import path from "path";
 import { APP_CONFIG } from "./server/config.ts";
 import { DB_PATH, recoverInterruptedJobs } from "./server/db.ts";
 import { aiddaRouter } from "./server/routes/aidda.ts";
+import { errorHandler } from "./server/middleware/error-handler.ts";
 
 const app = express();
 const recovery = recoverInterruptedJobs();
@@ -26,6 +27,9 @@ app.get("/api/health", (_req, res) => {
 });
 
 app.use("/api/aidda", aiddaRouter);
+
+// Global error handler (must be registered after routes)
+app.use(errorHandler);
 
 async function start() {
   if (process.env.NODE_ENV !== "production") {

@@ -7,7 +7,7 @@ export interface PythonRunResult {
   stderr: string;
 }
 
-export function parseLastJSON(stdout: string): any {
+export function parseLastJSON(stdout: string): Record<string, unknown> | null {
   const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
   for (let i = lines.length - 1; i >= 0; i--) {
     try {

@@ -9,6 +9,64 @@ AIDDA Workbench 是面向 A 股上市公司尽职调查场景的自动化工作�
 公告下载 → PDF 校验 → NotebookLM 上传 → 固化问题逐轮提问 → 答案保存 → 尽调报告拼接
 ```
 
+<p align="center">
+  <img src="https://img.shields.io/badge/License-Apache%202.0-blue" alt="License" />
+  <img src="https://img.shields.io/badge/Node-%3E%3D22-brightgreen" alt="Node" />
+  <img src="https://img.shields.io/badge/TypeScript-strict-3178C6" alt="TypeScript Strict" />
+  <img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs Welcome" />
+</p>
+
+## 系统架构
+
+```mermaid
+flowchart TB
+  subgraph Frontend["前端 (React 19 + Vite + Tailwind)"]
+    App["App.tsx<br/>视图路由"]
+    ProjectsHub["ProjectsHub<br/>项目大厅"]
+    Workbench["Workbench<br/>尽调工作台"]
+    Settings["Settings<br/>设置页"]
+    PdfPanel["PdfPanel<br/>PDF 下载面板"]
+    ReportViewer["ReportViewer<br/>报告输出区"]
+  end
+
+  subgraph Backend["后端 (Express + TypeScript)"]
+    API["/api/aidda/*<br/>路由分发"]
+    Projects["projects.ts<br/>项目 CRUD"]
+    Tasks["tasks.ts<br/>异步任务"]
+    NotebookLM["notebooklm.ts<br/>NotebookLM 状态"]
+    Validation["validate.ts<br/>Zod 请求验证"]
+    ErrorHandler["error-handler.ts<br/>统一错误处理"]
+  end
+
+  subgraph Data["数据层"]
+    SQLite[("SQLite<br/>(better-sqlite3)")]
+    LocalFS[("文件系统<br/>PDF / Manifest / 报告")]
+  end
+
+  subgraph Python["Python 工作脚本"]
+    DL["astock_download<br/>巨潮公告下载"]
+    UL["notebooklm_upload<br/>NotebookLM 上传"]
+    QA["notebooklm_run<br/>逐轮提问"]
+    Report["compose_dd_report<br/>报告拼接"]
+  end
+
+  subgraph External["外部服务"]
+    CNINFO["CNINFO<br/>巨潮资讯网"]
+    NBookLM["Google<br/>NotebookLM"]
+  end
+
+  Frontend -->|HTTP JSON| Backend
+  Backend -->|查询/写入| SQLite
+  Backend -->|读写| LocalFS
+  Backend -->|conda run| Python
+  DL -->|检索下载| CNINFO
+  UL -->|上传 PDF| NBookLM
+  QA -->|提问| NBookLM
+  QA -->|保存答案| LocalFS
+  Report -->|读取答案| LocalFS
+  Report -->|输出报告| LocalFS
+```
+
 ## 30 秒快速开始
 
 ```bash
