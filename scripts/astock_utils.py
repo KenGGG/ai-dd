@@ -168,28 +168,39 @@ def cninfo_list_all(
 
 def is_periodic_report(title: str, announce_type: str | None) -> bool:
     """
-    判断是否为定期报告类型。
-    年报、半年报、季报、审计报告、内控评价、募集资金专项报告。
+    判断是否为正式定期报告。
+    仅包含年报、半年报、一季报、三季报；不包含摘要、审计报告、
+    内控评价、募集资金专项报告、ESG 等随定期报告披露的附件。
     """
-    title = title or ""
-    announce_type = announce_type or ""
-    keywords = [
-        "年度报告", "半年度报告", "第一季度报告", "第二季度报告",
-        "第三季度报告", "季度报告", "审计报告", "内部控制评价报告",
-        "募集资金", "专项报告", "半年报", "年报", "季报",
-        "内部控制审计报告", "社会责任报告", "ESG报告",
+    normalized = re.sub(r"\s+", "", title or "")
+    announce_type = re.sub(r"\s+", "", announce_type or "")
+
+    excluded_keywords = [
+        "摘要", "英文", "取消", "提示性公告", "说明公告", "更正公告",
+        "补充公告", "延期", "关于", "专项报告", "募集资金", "审计报告",
+        "内部控制", "社会责任报告", "ESG", "环境、社会及管治", "可持续发展",
     ]
-    for kw in keywords:
-        if kw in title or kw in announce_type:
-            return True
-    return False
+    if any(kw in normalized for kw in excluded_keywords):
+        return False
+
+    report_patterns = [
+        r"(?:19|20)\d{2}年年度报告(?:（修订版）|\(修订版\))?$",
+        r"(?:19|20)\d{2}年半年度报告(?:（修订版）|\(修订版\))?$",
+        r"(?:19|20)\d{2}年(?:第一季度|一季度)报告(?:（修订版）|\(修订版\))?$",
+        r"(?:19|20)\d{2}年(?:第三季度|三季度)报告(?:（修订版）|\(修订版\))?$",
+    ]
+    if any(re.fullmatch(pattern, normalized) for pattern in report_patterns):
+        return True
+
+    type_keywords = ["年度报告", "半年度报告", "第一季度报告", "第三季度报告"]
+    return any(kw == announce_type for kw in type_keywords)
 
 
 def is_not_full_report(title: str = "") -> bool:
     """排除摘要、提示性公告、取消公告等非完整报告。"""
     title = title or ""
-    # 年度报告摘要排除
-    if "摘要" in title and "年度报告" in title:
+    # 定期报告摘要排除
+    if "摘要" in title and "报告" in title:
         return True
     # 排除包含以下关键词的公告（但含"修订"的更正公告保留）
     exclude_keywords = [

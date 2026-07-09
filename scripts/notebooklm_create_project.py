@@ -37,8 +37,8 @@ def main() -> None:
     raw_code = normalize_stock_code(args.stock_code)
     stock_name = args.stock_name or get_stock_name(raw_code) or raw_code
     project_id = args.project_id or generate_project_id(raw_code)
-    project_name = args.project_name or f"AIDDA-{raw_code}-{stock_name}-公告尽调"
-    notebook_title = f"AIDDA-{raw_code}-{stock_name}-近三年定期报告+最近200公告"
+    project_name = args.project_name or f"AIDDA-{raw_code}-{stock_name}"
+    notebook_title = f"AIDDA-{raw_code}-{stock_name}"
 
     if not asyncio.run(check_notebooklm_auth()):
         print(json.dumps({
@@ -50,6 +50,7 @@ def main() -> None:
             "project_name": project_name,
             "notebook_id": "",
             "notebook_title": notebook_title,
+            "notebook_source_count": 0,
         }, ensure_ascii=False))
         sys.exit(1)
 
@@ -64,6 +65,7 @@ def main() -> None:
             "project_name": project_name,
             "notebook_id": "",
             "notebook_title": notebook_title,
+            "notebook_source_count": 0,
         }, ensure_ascii=False))
         sys.exit(1)
 
@@ -75,6 +77,7 @@ def main() -> None:
         "project_name": project_name,
         "notebook_id": nb_result.get("notebook_id", ""),
         "notebook_title": nb_result.get("notebook_title", notebook_title),
+        "notebook_source_count": nb_result.get("source_count", 0),
         "error_message": "",
     }, ensure_ascii=False))
 

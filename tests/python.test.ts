@@ -38,6 +38,31 @@ test("announcement title filters parse comma and newline separated terms", () =>
   assert.deepEqual(stdout, ["开会通知|会议通知|临时股东大会", "开会通知"]);
 });
 
+test("periodic report detection only keeps annual semiannual and quarterly reports", () => {
+  const stdout = execFileSync(
+    "python3",
+    [
+      "-c",
+      [
+        "from scripts.astock_utils import is_periodic_report, is_not_full_report",
+        "cases = [('2025年年度报告', True), ('2025年半年度报告', True), ('2025年一季度报告', True), ('2025年第一季度报告', True), ('2025年三季度报告', True), ('2025年第三季度报告', True), ('2025年年度报告摘要', False), ('关于2025年半年度募集资金存放与使用情况的专项报告', False), ('2025年度审计报告', False), ('2025年ESG报告', False), ('关于召开2025年年度股东大会的通知', False)]",
+        "print('|'.join(str(is_periodic_report(title, '')) for title, _ in cases))",
+        "print('|'.join(str(expected) for _, expected in cases))",
+        "print(is_not_full_report('2025年半年度报告摘要'))",
+      ].join("; "),
+    ],
+    { encoding: "utf-8" },
+  )
+    .trim()
+    .split("\n");
+
+  assert.deepEqual(stdout, [
+    "True|True|True|True|True|True|False|False|False|False|False",
+    "True|True|True|True|True|True|False|False|False|False|False",
+    "True",
+  ]);
+});
+
 test("notebook source duplicate matching uses PDF and announcement titles", () => {
   const stdout = execFileSync(
     "python3",

@@ -1,6 +1,5 @@
 node_modules/
 dist/
-logs/
 .aidda.pid
 
 .env
@@ -9,13 +8,23 @@ logs/
 
 data/*.sqlite
 data/*.sqlite-*
-data/pdfs/
-data/answers/
-data/reports/
-data/manifests/
-data/projects/
-data/notebooklm/
-data/backups/
+data/announcement_filters.json
+data/answers/*
+data/backups/*
+data/logs/*
+data/manifests/*
+data/notebooklm/*
+data/pdfs/*
+data/projects/*
+data/reports/*
+!data/answers/.gitkeep
+!data/backups/.gitkeep
+!data/logs/.gitkeep
+!data/manifests/.gitkeep
+!data/notebooklm/.gitkeep
+!data/pdfs/.gitkeep
+!data/projects/.gitkeep
+!data/reports/.gitkeep
 
 scripts/__pycache__/
 *.pyc

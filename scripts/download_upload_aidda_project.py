@@ -28,7 +28,11 @@ from scripts.astock_utils import (
     is_periodic_report,
     normalize_stock_code,
 )
-from scripts.notebooklm_upload import upload_pdf_to_notebook
+from scripts.notebooklm_upload import (
+    find_existing_source_by_title,
+    list_notebook_sources,
+    upload_pdf_to_notebook,
+)
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -79,6 +83,13 @@ def _matched_filter(title: str, filter_terms: list[str]) -> str:
     return ""
 
 
+async def _load_existing_sources(notebook_id: str) -> list[Any]:
+    from notebooklm import NotebookLMClient
+
+    async with NotebookLMClient.from_storage() as client:
+        return await list_notebook_sources(client, notebook_id)
+
+
 def main() -> None:
     args = parse_args()
     raw_code = normalize_stock_code(args.stock_code)
@@ -94,6 +105,12 @@ def main() -> None:
     seen_urls: set[str] = set()
     seen_sha: set[str] = set()
     filter_terms = _parse_filter_terms(args.exclude_title_keywords)
+    try:
+        existing_sources = asyncio.run(_load_existing_sources(args.notebook_id))
+        logger.info("NotebookLM 已有附件数量：%s", len(existing_sources))
+    except Exception as e:
+        existing_sources = []
+        logger.warning("读取 NotebookLM 已有附件失败，将继续按本地流程处理: %s", e)
 
     logger.info("第一阶段：检索近三年定期报告")
     periodic_anns = cninfo_list_all(
@@ -110,15 +127,19 @@ def main() -> None:
     ]
     logger.info("定期报告数量：%s", len(periodic_items))
 
-    logger.info("第二阶段：检索最近 %s 个公告", args.recent_limit)
-    recent_anns = cninfo_list_all(
-        code=raw_code,
-        max_pages=max(7, args.recent_limit // 30 + 2),
-        page_size=30,
-        end_date=end_date,
-    )
-    recent_items = recent_anns[:args.recent_limit]
-    logger.info("最近公告数量：%s", len(recent_items))
+    if args.recent_limit > 0:
+        logger.info("第二阶段：检索最近 %s 个公告", args.recent_limit)
+        recent_anns = cninfo_list_all(
+            code=raw_code,
+            max_pages=max(7, args.recent_limit // 30 + 2),
+            page_size=30,
+            end_date=end_date,
+        )
+        recent_items = recent_anns[:args.recent_limit]
+        logger.info("最近公告数量：%s", len(recent_items))
+    else:
+        logger.info("第二阶段：已选择仅同步定期报告，跳过最近公告检索")
+        recent_items = []
     if filter_terms:
         logger.info("公告标题过滤词：%s", "、".join(filter_terms))
 
@@ -132,7 +153,7 @@ def main() -> None:
         for idx, item in enumerate(items):
             ann_id, url = _dedupe_key(item)
             matched_term = _matched_filter(item.get("title", ""), filter_terms)
-            if matched_term:
+            if matched_term and source_layer == "recent_200":
                 rec = {
                     "announcement_id": ann_id,
                     "title": item.get("title", ""),
@@ -146,6 +167,37 @@ def main() -> None:
                 }
                 records.append(_base_record(item, rec, raw_code, args.project_id, source_layer))
                 _write_manifest(manifest_path, records)
+                continue
+
+            existing_source = find_existing_source_by_title(
+                existing_sources,
+                item.get("title", ""),
+            )
+            if existing_source:
+                rec = {
+                    "announcement_id": ann_id,
+                    "title": item.get("title", ""),
+                    "date": item.get("date", ""),
+                    "adjunct_url": url,
+                    "local_path": "",
+                    "sha256": "",
+                    "download_status": "skipped_existing_source",
+                    "upload_status": "skipped_existing_source",
+                    "source_id": existing_source.get("source_id", ""),
+                    "source_title": existing_source.get("source_title", ""),
+                    "ready_status": "ready",
+                    "notebook_id": args.notebook_id,
+                    "error_message": "",
+                }
+                records.append(_base_record(item, rec, raw_code, args.project_id, source_layer))
+                _write_manifest(manifest_path, records)
+                logger.info(
+                    "[%s/%s][%s] NotebookLM 已有附件，跳过下载上传：%s",
+                    idx + 1,
+                    len(items),
+                    source_layer,
+                    item.get("title", ""),
+                )
                 continue
 
             if (ann_id and ann_id in seen_ids) or (url and url in seen_urls):
@@ -199,6 +251,18 @@ def main() -> None:
                 rec["notebook_id"] = args.notebook_id
                 if upload_result.get("error_message"):
                     rec["error_message"] = upload_result["error_message"]
+                if upload_result.get("status") in ("uploaded", "skipped_existing_source"):
+                    existing_sources.append(
+                        type(
+                            "NotebookSourceSnapshot",
+                            (),
+                            {
+                                "id": upload_result.get("source_id", ""),
+                                "title": upload_result.get("source_title", ""),
+                                "status": rec["ready_status"],
+                            },
+                        )()
+                    )
 
             records.append(rec)
             _write_manifest(manifest_path, records)
@@ -214,6 +278,7 @@ def main() -> None:
         "recent_count": len(recent_items),
         "after_dedup": len(records),
         "download_success": sum(1 for s in statuses if s == "downloaded"),
+        "download_skipped_existing": sum(1 for s in statuses if s == "skipped_existing_source"),
         "download_failed": sum(1 for s in statuses if s.startswith("download_failed") or s == "failed"),
         "skipped_duplicate": sum(1 for s in statuses if s == "skipped_duplicate"),
         "upload_success": sum(1 for s in upload_statuses if s in ("uploaded", "skipped_existing_source")),

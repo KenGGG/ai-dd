@@ -59,7 +59,31 @@ def _find_existing_source(
     candidates = _candidate_source_titles(pdf_path, manifest_record)
     for source in existing_sources:
         source_title = _normalize_source_title(str(getattr(source, "title", "") or ""))
-        if source_title and source_title in candidates:
+        if source_title and any(
+            source_title == candidate or source_title in candidate or candidate in source_title
+            for candidate in candidates
+        ):
+            return _source_to_dict(source)
+    return None
+
+
+def find_existing_source_by_title(
+    existing_sources: list[Any],
+    title: str,
+) -> dict[str, str] | None:
+    normalized_title = _normalize_source_title(title)
+    if not normalized_title:
+        return None
+    candidates = {
+        normalized_title,
+        _normalize_source_title(f"{title}.pdf"),
+    }
+    for source in existing_sources:
+        source_title = _normalize_source_title(str(getattr(source, "title", "") or ""))
+        if source_title and any(
+            source_title == candidate or source_title in candidate or candidate in source_title
+            for candidate in candidates
+        ):
             return _source_to_dict(source)
     return None
 
@@ -112,6 +136,9 @@ async def get_or_create_notebook(
         notebooks = await client.notebooks.list()
         notebook_map = {n.id: n.title for n in notebooks}
 
+        async def _source_count(target_notebook_id: str) -> int:
+            return len(await list_notebook_sources(client, target_notebook_id))
+
         if mode == "reuse":
             if not notebook_id:
                 return {
@@ -127,6 +154,7 @@ async def get_or_create_notebook(
                     "status": "reused",
                     "notebook_id": notebook_id,
                     "notebook_title": notebook_map[notebook_id],
+                    "source_count": await _source_count(notebook_id),
                     "error_message": "",
                 }
             else:
@@ -146,6 +174,7 @@ async def get_or_create_notebook(
                 "status": "reused",
                 "notebook_id": existing_id,
                 "notebook_title": notebook_title,
+                "source_count": await _source_count(existing_id),
                 "error_message": "",
             }
 
@@ -157,6 +186,7 @@ async def get_or_create_notebook(
                 "status": "created",
                 "notebook_id": notebook.id,
                 "notebook_title": notebook.title,
+                "source_count": 0,
                 "error_message": "",
             }
         except Exception as e:
@@ -344,7 +374,7 @@ def run_upload(
         }
 
     # 2. 创建或复用笔记
-    notebook_title = f"AIDDA-{stock_code}-{stock_name}-近三年定期报告+最近200公告"
+    notebook_title = f"AIDDA-{stock_code}-{stock_name}"
     nb_result = asyncio.run(
         get_or_create_notebook(
             notebook_title=notebook_title,
@@ -386,6 +416,7 @@ def run_upload(
         "status": "completed",
         "notebook_id": nb_id,
         "notebook_title": nb_title,
+        "notebook_source_count": nb_result.get("source_count", 0),
         "manifest_records": updated_records,
         "upload_success": success,
         "upload_failed": failed,

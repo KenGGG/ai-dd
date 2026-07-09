@@ -152,6 +152,42 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="跳过报告拼接",
     )
+    parser.add_argument(
+        "--max-question-rounds",
+        type=int,
+        default=0,
+        help="最多执行多少轮 NotebookLM 提问；0 表示不限制",
+    )
+    parser.add_argument(
+        "--max-question-sources",
+        type=int,
+        default=0,
+        help="每轮最多限定多少个 NotebookLM source；0 表示不限制",
+    )
+    parser.add_argument(
+        "--force-questions",
+        action="store_true",
+        help="重新提问已存在答案的问题",
+    )
+    parser.add_argument(
+        "--question-method",
+        type=str,
+        choices=["chat", "report"],
+        default="chat",
+        help="NotebookLM 问答方式：chat 使用对话回复；report 使用 generate report 自定义报告",
+    )
+    parser.add_argument(
+        "--report-prompt-prefix",
+        type=str,
+        default="请根据当前的资料，特别是2025、2026年近期这些报告，回答以下问题：",
+        help="report 问答方式下拼接在问题前的自定义报告提示词前缀",
+    )
+    parser.add_argument(
+        "--round-ids",
+        type=str,
+        default="",
+        help="只执行指定问题 round_id，多个 ID 可用逗号或换行分隔",
+    )
 
     # 输出参数
     parser.add_argument(
@@ -223,6 +259,7 @@ def print_summary(summary: dict) -> None:
     print(f"  问题轮次数：{summary.get('rounds_total', 'N/A')}")
     print(f"  成功回答轮次：{summary.get('rounds_success', 'N/A')}")
     print(f"  失败轮次：{summary.get('rounds_failed', 'N/A')}")
+    print(f"  问答方式：{summary.get('question_method', 'chat')}")
     print()
     print(f"  报告路径：{summary.get('report_path', 'N/A')}")
     print(f"  manifest 路径：{summary.get('manifest_path', 'N/A')}")
@@ -332,6 +369,11 @@ def main() -> None:
 
     notebook_id = upload_result.get("notebook_id", "") or args.notebook_id or ""
     question_result = {"status": "skipped"}
+    round_ids = [
+        part.strip()
+        for part in args.round_ids.replace("，", ",").replace("\n", ",").split(",")
+        if part.strip()
+    ]
 
     if not args.skip_questions and notebook_id:
         question_result = run_questions(
@@ -339,11 +381,23 @@ def main() -> None:
             project_id=project_id,
             manifest_records=manifest_records,
             skip_questions=False,
+            max_rounds=args.max_question_rounds or None,
+            max_source_ids=args.max_question_sources or None,
+            round_ids=round_ids or None,
+            force=args.force_questions,
+            question_method=args.question_method,
+            report_prompt_prefix=args.report_prompt_prefix,
         )
         summary["rounds_total"] = question_result.get("rounds_total", 0)
         summary["rounds_success"] = question_result.get("rounds_success", 0)
         summary["rounds_failed"] = question_result.get("rounds_failed", 0)
         summary["answers_dir"] = question_result.get("answers_dir", "")
+        summary["question_method"] = question_result.get("question_method", args.question_method)
+        if question_result.get("status") in {"auth_failed", "partial"} or summary["rounds_failed"] > 0:
+            summary.update(question_result)
+            print_summary(summary)
+            logger.error("提问阶段存在失败，已保留进度，可从断点继续。")
+            sys.exit(1)
     elif args.skip_questions:
         logger.info("已跳过提问阶段")
     elif not notebook_id:

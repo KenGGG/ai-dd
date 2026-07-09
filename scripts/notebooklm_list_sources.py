@@ -1,5 +1,8 @@
 """
-列出指定 NotebookLM 笔记中的 sources，用于前端展示存量笔记附件。
+列出指定 NotebookLM 笔记中的 sources。
+
+这是兼容脚本：新版简化界面默认不再展示 NotebookLM source 对齐矩阵，
+但旧服务实例或旧浏览器页面可能仍会调用这个入口。
 """
 
 import argparse

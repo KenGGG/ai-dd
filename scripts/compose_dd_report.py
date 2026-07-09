@@ -5,7 +5,7 @@
 1. 读取每轮答案文件
 2. 按 dd_report_outline.md 模板框架拼接 Markdown 报告
 3. 公告无法填列的内容保留占位符
-4. 在报告末尾追加附录（公告引用、未能填列事项、提问记录、PDF 附件清单）
+4. 在报告末尾追加附录（公告引用、未能填列事项、提问记录）
 """
 import json
 import logging
@@ -30,21 +30,34 @@ REPORTS_DIR = Path(__file__).resolve().parent.parent / "data" / "reports"
 
 
 def load_answers(project_id: str) -> dict[str, str]:
-    """加载项目所有答案文件"""
+    """加载项目所有答案文件，优先按 answers_manifest 中的 round_id 映射。"""
     answers_dir = Path(__file__).resolve().parent.parent / "data" / "answers" / project_id
     answers: dict[str, str] = {}
     if not answers_dir.exists():
         logger.warning(f"答案目录不存在: {answers_dir}")
         return answers
 
-    for f in sorted(answers_dir.glob("round_*.md")):
-        round_id = f.stem  # round_0, round_1, ...
+    manifest = load_answers_manifest(project_id)
+    results = manifest.get("results", []) if isinstance(manifest, dict) else []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        round_id = item.get("round_id")
+        answer_file = item.get("answer_file")
+        if not round_id or not answer_file:
+            continue
+        path = Path(str(answer_file))
+        if not path.exists():
+            continue
+        content = path.read_text(encoding="utf-8")
+        answers[str(round_id)] = content if content.strip() else f"\n\n{PLACEHOLDERS['unfilled']}\n\n"
+        logger.debug(f"  已加载: {path.name} ({len(content)} chars)")
+
+    for f in sorted(answers_dir.glob("*.md")):
+        if f.stem in answers:
+            continue
         content = f.read_text(encoding="utf-8")
-        if content.strip():
-            answers[round_id] = content
-        else:
-            answers[round_id] = f"\n\n{PLACEHOLDERS['unfilled']}\n\n"
-        logger.debug(f"  已加载: {f.name} ({len(content)} chars)")
+        answers[f.stem] = content if content.strip() else f"\n\n{PLACEHOLDERS['unfilled']}\n\n"
 
     return answers
 
@@ -96,6 +109,7 @@ def render_outline(
     project_name: str = "",
     stock_code: str = "",
     stock_name: str = "",
+    question_rounds: list[dict] | None = None,
 ) -> str:
     """
     将答案填充到报告大纲模板中。
@@ -113,18 +127,31 @@ def render_outline(
         outline_text = outline_text.replace(key, value)
 
     # 替换轮次答案占位符
+    rendered_round_ids: set[str] = set()
     for round_id, answer_text in answers.items():
         placeholder = f"{{{{{round_id}_answer}}}}"
         if placeholder in outline_text:
             outline_text = outline_text.replace(placeholder, answer_text.strip())
+            rendered_round_ids.add(round_id)
 
     # 填充未替换的占位符（没有对应答案的轮次）
-    pattern = re.compile(r'\{\{round_\d+_answer\}\}')
+    pattern = re.compile(r'\{\{(?:round_\d+|q-custom-[\w-]+)_answer\}\}')
     outline_text = pattern.sub(f"\n\n{PLACEHOLDERS['unfilled']}\n\n", outline_text)
 
     # 填充其他模板变量
     for key, placeholder in PLACEHOLDERS.items():
         outline_text = outline_text.replace(f"{{{{{key}}}}}", placeholder)
+
+    extra_sections: list[str] = []
+    for round_data in question_rounds or []:
+        round_id = str(round_data.get("round_id", ""))
+        if not round_id or round_id in rendered_round_ids or round_id not in answers:
+            continue
+        title = str(round_data.get("round_name", round_id))
+        extra_sections.append(f"\n\n---\n\n## 补充问题：{title}\n\n{answers[round_id].strip()}")
+
+    if extra_sections:
+        outline_text += "\n\n---\n\n# 补充问题分析" + "".join(extra_sections)
 
     return outline_text
 
@@ -188,18 +215,6 @@ def build_appendix(
             answer_file = r.get("answer_file", "")
             round_no = r.get("round_no", "")
             appendix.append(f"| {round_no} | {round_name} | {status} | {answer_file} |\n")
-
-    # 附录 E：PDF 附件清单
-    appendix.append("\n\n## 附录 E：PDF 附件清单\n\n")
-    if manifest_records:
-        appendix.append("| 序号 | 文件路径 | sha256 | 下载状态 | 上传状态 |\n")
-        appendix.append("|------|---------|-------|---------|---------|\n")
-        for idx, rec in enumerate(manifest_records, 1):
-            local_path = rec.get("local_path", "")
-            sha = rec.get("sha256", "")[:16] if rec.get("sha256") else ""
-            dl_status = rec.get("download_status", "")
-            ul_status = rec.get("upload_status", "")
-            appendix.append(f"| {idx} | {local_path} | {sha} | {dl_status} | {ul_status} |\n")
 
     return "".join(appendix)
 
@@ -286,12 +301,14 @@ def compose_report(
         logger.warning(f"没有找到答案文件，报告将包含全部占位符")
 
     # 4. 填充报告大纲
+    question_rounds = load_question_rounds()
     report_body = render_outline(
         outline_text=outline_text,
         answers=answers,
         project_name=project_name,
         stock_code=stock_code,
         stock_name=stock_name,
+        question_rounds=question_rounds,
     )
 
     # 5. 构建附录

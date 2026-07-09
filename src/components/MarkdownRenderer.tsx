@@ -113,36 +113,36 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
     // 1. Heading H1
     if (firstLine.startsWith("# ")) {
       return (
-        <h1
-          key={blockIndex}
-          className="text-2xl font-bold text-slate-900 dark:text-white mt-8 mb-4 border-b pb-2 border-slate-200 dark:border-slate-800"
-        >
-          {renderInline(firstLine.substring(2))}
-        </h1>
+        <React.Fragment key={blockIndex}>
+          <h1 className="text-2xl font-bold text-slate-900 dark:text-white mt-8 mb-4 border-b pb-2 border-slate-200 dark:border-slate-800">
+            {renderInline(firstLine.substring(2))}
+          </h1>
+          {renderTrailingLines(lines, blockIndex)}
+        </React.Fragment>
       );
     }
 
     // 2. Heading H2
     if (firstLine.startsWith("## ")) {
       return (
-        <h2
-          key={blockIndex}
-          className="text-xl font-bold text-slate-800 dark:text-slate-100 mt-6 mb-3 border-l-4 pl-3 border-blue-500 pb-0.5"
-        >
-          {renderInline(firstLine.substring(3))}
-        </h2>
+        <React.Fragment key={blockIndex}>
+          <h2 className="text-xl font-bold text-slate-800 dark:text-slate-100 mt-6 mb-3 border-l-4 pl-3 border-blue-500 pb-0.5">
+            {renderInline(firstLine.substring(3))}
+          </h2>
+          {renderTrailingLines(lines, blockIndex)}
+        </React.Fragment>
       );
     }
 
     // 3. Heading H3
     if (firstLine.startsWith("### ")) {
       return (
-        <h3
-          key={blockIndex}
-          className="text-lg font-bold text-slate-800 dark:text-slate-200 mt-4 mb-2"
-        >
-          {renderInline(firstLine.substring(4))}
-        </h3>
+        <React.Fragment key={blockIndex}>
+          <h3 className="text-lg font-bold text-slate-800 dark:text-slate-200 mt-4 mb-2">
+            {renderInline(firstLine.substring(4))}
+          </h3>
+          {renderTrailingLines(lines, blockIndex)}
+        </React.Fragment>
       );
     }
 
@@ -287,6 +287,12 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
   const lastIndexCodeBlock = (lines: string[]): number => {
     const endIdx = lines.findIndex((line, i) => i > 0 && line.trim().startsWith("```"));
     return endIdx !== -1 ? endIdx : lines.length;
+  };
+
+  const renderTrailingLines = (lines: string[], blockIndex: number) => {
+    const trailing = lines.slice(1).join("\n").trim();
+    if (!trailing) return null;
+    return renderBlock(trailing, blockIndex * 1000 + 1);
   };
 
   return (

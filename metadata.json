@@ -1,6 +1,0 @@
-{
-  "name": "AI驱动的自动化尽职调查工作台",
-  "description": "基于巨潮公告、NotebookLM 和本地 SQLite 的自动化尽职调查工作台，支持项目管理、PDF 下载上传、逐轮提问与 Markdown 报告拼接。",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_API"]
-}
