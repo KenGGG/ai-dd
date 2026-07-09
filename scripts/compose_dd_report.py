@@ -9,7 +9,6 @@
 """
 import json
 import logging
-import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -70,25 +69,6 @@ def load_question_rounds() -> list[dict]:
     with open(path, "r", encoding="utf-8") as f:
         rounds = json.load(f)
     return rounds
-
-
-def load_manifest(project_id: str) -> list[dict]:
-    """加载 manifest 记录"""
-    manifest_path = (
-        Path(__file__).resolve().parent.parent
-        / "data" / "manifests"
-        / f"{project_id}_announcements.jsonl"
-    )
-    records = []
-    if not manifest_path.exists():
-        logger.warning(f"manifest 不存在: {manifest_path}")
-        return records
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                records.append(json.loads(line))
-    return records
 
 
 def load_answers_manifest(project_id: str) -> dict:
@@ -156,118 +136,6 @@ def render_outline(
     return outline_text
 
 
-def build_appendix(
-    project_id: str,
-    stock_code: str = "",
-    stock_name: str = "",
-    manifest_records: list[dict] | None = None,
-    answers_manifest: dict | None = None,
-) -> str:
-    """构建附录内容"""
-    appendix = []
-
-    # 附录 A：公告引用清单
-    appendix.append("\n\n---\n## 附录 A：公告引用清单\n\n")
-    appendix.append("| 序号 | 公告标题 | 披露日期 | 公告类型 | 来源层级 |\n")
-    appendix.append("|------|---------|---------|---------|---------|\n")
-    if manifest_records:
-        for idx, rec in enumerate(manifest_records, 1):
-            title = rec.get("title", "")
-            date = rec.get("date", "")
-            ann_type = rec.get("announcement_type", "")
-            layer = rec.get("source_layer", "")
-            line = f"| {idx} | {title} | {date} | {ann_type} | {layer} |\n"
-            appendix.append(line)
-
-    # 附录 B：未能填列事项清单
-    appendix.append("\n\n## 附录 B：未能填列事项清单\n\n")
-    unfilled_items = find_unfilled_items(manifest_records, answers_manifest)
-    if unfilled_items:
-        for item in unfilled_items:
-            appendix.append(f"- {item}\n")
-    else:
-        appendix.append(f"{PLACEHOLDERS['unfilled']}\n")
-
-    # 附录 C：需补充资料清单
-    appendix.append("\n\n## 附录 C：需补充资料清单\n\n")
-    supplement_items = [
-        "行业研究报告或第三方行业分析数据",
-        "实地现场尽调纪要",
-        "管理层访谈记录",
-        "供应商/客户访谈纪要",
-        "征信报告",
-        "工商、税务、海关等外部合规证明",
-        "资产评估报告（如有）",
-        "法律意见书（如有）",
-    ]
-    for item in supplement_items:
-        appendix.append(f"- {item}\n")
-
-    # 附录 D：NotebookLM 提问记录
-    appendix.append("\n\n## 附录 D：NotebookLM 提问记录\n\n")
-    if answers_manifest:
-        results = answers_manifest.get("results", [])
-        appendix.append("| 轮次 | 问题名称 | 状态 | 答案文件 |\n")
-        appendix.append("|------|---------|------|---------|\n")
-        for r in results:
-            round_name = r.get("round_name", "")
-            status = r.get("status", "")
-            answer_file = r.get("answer_file", "")
-            round_no = r.get("round_no", "")
-            appendix.append(f"| {round_no} | {round_name} | {status} | {answer_file} |\n")
-
-    return "".join(appendix)
-
-
-def find_unfilled_items(
-    manifest_records: list[dict] | None,
-    answers_manifest: dict | None,
-) -> list[str]:
-    """找出未能填列的事项"""
-    items: list[str] = []
-
-    # 检查下载失败的公告
-    if manifest_records:
-        failed_downloads = [
-            r for r in manifest_records
-            if r.get("download_status", "").startswith("download_failed")
-            or r.get("download_status") == "failed"
-        ]
-        for r in failed_downloads:
-            items.append(
-                f"公告下载失败: {r.get('title', '')} ({r.get('date', '')}) - "
-                f"{r.get('error_message', '')}"
-            )
-
-        # 检查上传失败的
-        failed_uploads = [
-            r for r in manifest_records
-            if r.get("upload_status") == "upload_failed"
-        ]
-        for r in failed_uploads:
-            items.append(
-                f"NotebookLM 上传失败: {r.get('title', '')} - "
-                f"{r.get('error_message', '')}"
-            )
-
-    # 检查提问失败的轮次
-    if answers_manifest:
-        failed_rounds = [
-            r for r in answers_manifest.get("results", [])
-            if r.get("status") == "failed"
-        ]
-        for r in failed_rounds:
-            items.append(
-                f"第 {r.get('round_no', '')} 轮提问失败: "
-                f"{r.get('round_name', '')} - {r.get('error_message', '')}"
-            )
-
-    if not items:
-        items.append("暂无未能填列事项")
-
-    return items
-
-
 def compose_report(
     project_id: str,
     project_name: str = "",
@@ -293,10 +161,6 @@ def compose_report(
     # 2. 加载答案
     answers = load_answers(project_id)
 
-    # 3. 加载 manifest 和答案索引
-    manifest_records = load_manifest(project_id)
-    answers_manifest = load_answers_manifest(project_id)
-
     if not answers:
         logger.warning(f"没有找到答案文件，报告将包含全部占位符")
 
@@ -311,17 +175,8 @@ def compose_report(
         question_rounds=question_rounds,
     )
 
-    # 5. 构建附录
-    appendix = build_appendix(
-        project_id=project_id,
-        stock_code=stock_code,
-        stock_name=stock_name,
-        manifest_records=manifest_records,
-        answers_manifest=answers_manifest,
-    )
-
-    # 6. 拼接完整报告
-    full_report = report_body + appendix
+    # 5. 拼接完整报告。业务报告不再追加公告清单、提问记录等附录。
+    full_report = report_body
 
     # 7. 写入文件
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
