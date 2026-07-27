@@ -21,7 +21,8 @@ function readPath(name: string, fallback: string): string {
 export const APP_CONFIG = {
   serviceName: "aidda-workbench",
   port: readNumber("PORT", 3871),
-  host: process.env.HOST || "0.0.0.0",
+  host: process.env.HOST || "127.0.0.1",
+  authToken: process.env.AIDDA_TOKEN || "",
   dataDir: readPath("AIDDA_DATA_DIR", "data"),
   dbPath: readPath("AIDDA_DB_PATH", path.join("data", "aidda.sqlite")),
   condaEnv: process.env.AIDDA_CONDA_ENV || "openclaw",

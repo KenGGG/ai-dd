@@ -25,18 +25,25 @@ PLACEHOLDERS = {
 }
 
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
-REPORTS_DIR = Path(__file__).resolve().parent.parent / "data" / "reports"
+DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
-def load_answers(project_id: str) -> dict[str, str]:
+def _resolve_data_dirs(data_dir: str | None = None) -> tuple[Path, Path]:
+    """解析数据目录和模板目录"""
+    base = Path(data_dir) if data_dir else DEFAULT_DATA_DIR
+    return base / "answers", TEMPLATES_DIR
+
+
+def load_answers(project_id: str, data_dir: str | None = None) -> dict[str, str]:
     """加载项目所有答案文件，优先按 answers_manifest 中的 round_id 映射。"""
-    answers_dir = Path(__file__).resolve().parent.parent / "data" / "answers" / project_id
+    answers_dir, _ = _resolve_data_dirs(data_dir)
+    project_answers_dir = answers_dir / project_id
     answers: dict[str, str] = {}
-    if not answers_dir.exists():
-        logger.warning(f"答案目录不存在: {answers_dir}")
+    if not project_answers_dir.exists():
+        logger.warning(f"答案目录不存在: {project_answers_dir}")
         return answers
 
-    manifest = load_answers_manifest(project_id)
+    manifest = load_answers_manifest(project_id, data_dir)
     results = manifest.get("results", []) if isinstance(manifest, dict) else []
     for item in results:
         if not isinstance(item, dict):
@@ -52,7 +59,7 @@ def load_answers(project_id: str) -> dict[str, str]:
         answers[str(round_id)] = content if content.strip() else f"\n\n{PLACEHOLDERS['unfilled']}\n\n"
         logger.debug(f"  已加载: {path.name} ({len(content)} chars)")
 
-    for f in sorted(answers_dir.glob("*.md")):
+    for f in sorted(project_answers_dir.glob("*.md")):
         if f.stem in answers:
             continue
         content = f.read_text(encoding="utf-8")
@@ -61,9 +68,10 @@ def load_answers(project_id: str) -> dict[str, str]:
     return answers
 
 
-def load_question_rounds() -> list[dict]:
+def load_question_rounds(data_dir: str | None = None) -> list[dict]:
     """加载问题清单（获取轮次名称信息）"""
-    path = TEMPLATES_DIR / "question_rounds.json"
+    _, templates_dir = _resolve_data_dirs(data_dir)
+    path = templates_dir / "question_rounds.json"
     if not path.exists():
         return []
     with open(path, "r", encoding="utf-8") as f:
@@ -71,12 +79,10 @@ def load_question_rounds() -> list[dict]:
     return rounds
 
 
-def load_answers_manifest(project_id: str) -> dict:
+def load_answers_manifest(project_id: str, data_dir: str | None = None) -> dict:
     """加载 answers_manifest.json"""
-    path = (
-        Path(__file__).resolve().parent.parent
-        / "data" / "answers" / project_id / "answers_manifest.json"
-    )
+    answers_dir, _ = _resolve_data_dirs(data_dir)
+    path = answers_dir / project_id / "answers_manifest.json"
     if not path.exists():
         return {}
     with open(path, "r", encoding="utf-8") as f:
@@ -142,6 +148,7 @@ def compose_report(
     stock_code: str = "",
     stock_name: str = "",
     skip_report: bool = False,
+    data_dir: str | None = None,
 ) -> dict[str, Any]:
     """
     拼接尽调报告。
@@ -152,20 +159,24 @@ def compose_report(
     if skip_report:
         return {"status": "skipped", "report_path": ""}
 
+    data_base, _ = _resolve_data_dirs(data_dir)
+    reports_dir = data_base / "reports"
+
     # 1. 读取模板
-    outline_path = TEMPLATES_DIR / "dd_report_outline.md"
+    _, templates_dir = _resolve_data_dirs(data_dir)
+    outline_path = templates_dir / "dd_report_outline.md"
     if not outline_path.exists():
         raise FileNotFoundError(f"报告模板不存在: {outline_path}")
     outline_text = outline_path.read_text(encoding="utf-8")
 
     # 2. 加载答案
-    answers = load_answers(project_id)
+    answers = load_answers(project_id, data_dir)
 
     if not answers:
         logger.warning(f"没有找到答案文件，报告将包含全部占位符")
 
     # 4. 填充报告大纲
-    question_rounds = load_question_rounds()
+    question_rounds = load_question_rounds(data_dir)
     report_body = render_outline(
         outline_text=outline_text,
         answers=answers,
@@ -175,12 +186,70 @@ def compose_report(
         question_rounds=question_rounds,
     )
 
-    # 5. 拼接完整报告。业务报告不再追加公告清单、提问记录等附录。
-    full_report = report_body
+    # 5. 构建附录：公告清单、未填列事项、提问记录、失败清单
+    appendix_parts: list[str] = []
+
+    # 5a. 加载 manifest 用于附录
+    answers_dir_base, _ = _resolve_data_dirs(data_dir)
+    manifest_path = Path(data_dir) / "manifests" / f"{project_id}_announcements.jsonl" if data_dir else (DEFAULT_DATA_DIR / "manifests" / f"{project_id}_announcements.jsonl")
+
+    manifest_records = []
+    if manifest_path.exists():
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        manifest_records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+
+    if manifest_records:
+        rows: list[str] = [f"| 序号 | 公告标题 | 日期 | 类型 | 下载状态 | 上传状态 | NotebookLM Source |"]
+        rows.append("|------|---------|------|------|---------|---------|------------------|")
+        for idx, rec in enumerate(manifest_records, 1):
+            title = str(rec.get("title", ""))
+            date = str(rec.get("date", ""))
+            ann_type = str(rec.get("announcement_type", ""))
+            dl_status = str(rec.get("download_status", ""))
+            ul_status = str(rec.get("upload_status", ""))
+            source_id = str(rec.get("source_id", ""))[:16]
+            rows.append(f"| {idx} | {title} | {date} | {ann_type} | {dl_status} | {ul_status} | {source_id} |")
+        appendix_parts.append(f"\n\n---\n\n# 附录 A：公告引用清单\n\n{'\\n'.join(rows)}")
+
+    # 5b. 未填列事项
+    unfilled_entries = [
+        item for item in load_answers_manifest(project_id, data_dir).get("results", [])
+        if isinstance(item, dict) and (item.get("status") == "failed")
+    ]
+    if unfilled_entries:
+        lines = ["\n\n---\n\n# 附录 B：未填列及失败事项", ""]
+        for ue in unfilled_entries:
+            name = ue.get("round_name", ue.get("round_id", "?"))
+            error = ue.get("error_message", "")
+            lines.append(f"- **{name}**: {error or '无详细说明'}")
+        appendix_parts.append("\n".join(lines))
+
+    # 5c. 问题执行记录
+    answer_manifest = load_answers_manifest(project_id, data_dir)
+    results = answer_manifest.get("results", []) if isinstance(answer_manifest, dict) else []
+    if results:
+        rows_r: list[str] = [f"| 轮次 | 问题名称 | 状态 | 错误信息 |"]
+        rows_r.append("|------|---------|------|---------|")
+        for r in results:
+            round_no = r.get("round_no", "")
+            round_name = r.get("round_name", r.get("round_id", ""))
+            status = r.get("status", "")
+            error = str(r.get("error_message", ""))[:50]
+            rows_r.append(f"| {round_no} | {round_name} | {status} | {error} |")
+        appendix_parts.append(f"\n\n---\n\n# 附录 C：提问执行记录\n\n{'\\n'.join(rows_r)}")
+
+    # 6. 拼接完整报告
+    full_report = report_body + "".join(appendix_parts)
 
     # 7. 写入文件
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    report_path = REPORTS_DIR / f"{project_id}_dd_report.md"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    report_path = reports_dir / f"{project_id}_dd_report.md"
     report_path.write_text(full_report, encoding="utf-8")
     logger.info(f"报告已生成: {report_path} ({len(full_report)} chars)")
 
@@ -189,7 +258,7 @@ def compose_report(
     need_verify_count = full_report.count(PLACEHOLDERS["need_verify"])
 
     # 统计各轮次状态
-    question_rounds = load_question_rounds()
+    question_rounds = load_question_rounds(data_dir)
     total_rounds = len(question_rounds)
     answer_count = len(answers)
 

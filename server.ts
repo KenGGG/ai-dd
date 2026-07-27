@@ -16,6 +16,16 @@ if (recovery.jobsRecovered > 0 || recovery.projectsRecovered > 0) {
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
+// ── Auth middleware ────────────────────────────────────────────
+app.use((req, res, next) => {
+  if (req.path === "/api/health") return next();
+  if (!APP_CONFIG.authToken) return next(); // no token configured → allow all
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : header;
+  if (token === APP_CONFIG.authToken) return next();
+  res.status(401).json({ error: "未授权" });
+});
+
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,

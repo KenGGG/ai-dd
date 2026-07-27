@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -20,13 +21,20 @@ logger = logging.getLogger(__name__)
 
 # ── 常量 ──────────────────────────────────────────────────────────────
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
-ANSWERS_DIR = Path(__file__).resolve().parent.parent / "data" / "answers"
+DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+
+def _resolve_dirs(data_dir: str | None = None) -> tuple[Path, Path]:
+    """解析答案目录和模板目录"""
+    base = Path(data_dir) if data_dir else DEFAULT_DATA_DIR
+    return base / "answers", TEMPLATES_DIR
 REPORT_PROMPT_PREFIX = "请根据当前的资料，特别是2025、2026年近期这些报告，回答以下问题："
 
 
-def load_question_rounds() -> list[dict]:
+def load_question_rounds(data_dir: str | None = None) -> list[dict]:
     """加载问题清单"""
-    path = TEMPLATES_DIR / "question_rounds.json"
+    _, templates_dir = _resolve_dirs(data_dir)
+    path = templates_dir / "question_rounds.json"
     if not path.exists():
         raise FileNotFoundError(f"问题模板文件不存在: {path}")
     with open(path, "r", encoding="utf-8") as f:
@@ -34,17 +42,18 @@ def load_question_rounds() -> list[dict]:
     return [r for r in rounds if r.get("enabled", True)]
 
 
-def select_question_rounds(round_ids: list[str] | None = None) -> list[dict]:
-    rounds = load_question_rounds()
+def select_question_rounds(round_ids: list[str] | None = None, data_dir: str | None = None) -> list[dict]:
+    rounds = load_question_rounds(data_dir)
     if not round_ids:
         return rounds
     wanted = set(round_ids)
     return [round_data for round_data in rounds if round_data.get("round_id") in wanted]
 
 
-def get_answers_dir(project_id: str) -> Path:
+def get_answers_dir(project_id: str, data_dir: str | None = None) -> Path:
     """获取项目答案目录"""
-    d = ANSWERS_DIR / project_id
+    answers_dir, _ = _resolve_dirs(data_dir)
+    d = answers_dir / project_id
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -79,6 +88,9 @@ def write_answers_manifest(
                 "error_message": "",
             })
 
+    import tempfile
+    import shutil
+
     success_statuses = {"success", "skipped"}
     answers_manifest = {
         "project_id": project_id,
@@ -93,8 +105,16 @@ def write_answers_manifest(
         "updated_at": datetime.now().isoformat(),
     }
     manifest_path = answers_dir / "answers_manifest.json"
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(answers_manifest, f, ensure_ascii=False, indent=2)
+    fd, tmp = tempfile.mkstemp(dir=answers_dir, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(answers_manifest, f, ensure_ascii=False, indent=2)
+        tmp_path = Path(tmp)
+        tmp_path.replace(manifest_path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
     return manifest_path
 
 
@@ -245,6 +265,7 @@ async def run_all_questions(
     force: bool = False,
     question_method: str = "chat",
     report_prompt_prefix: str = REPORT_PROMPT_PREFIX,
+    data_dir: str | None = None,
 ) -> dict[str, Any]:
     """
     按问题清单逐轮提问，保存答案。
@@ -271,7 +292,7 @@ async def run_all_questions(
     rounds = select_question_rounds(round_ids)
     if max_rounds and max_rounds > 0:
         rounds = rounds[:max_rounds]
-    answers_dir = get_answers_dir(project_id)
+    answers_dir = get_answers_dir(project_id, data_dir)
     old_manifest = read_answers_manifest(answers_dir)
     old_results = old_manifest.get("results", [])
     previous_by_round_id = {
@@ -632,6 +653,7 @@ def run_questions(
     force: bool = False,
     question_method: str = "chat",
     report_prompt_prefix: str = REPORT_PROMPT_PREFIX,
+    data_dir: str | None = None,
 ) -> dict[str, Any]:
     """同步执行的提问入口"""
     from notebooklm import NotebookLMClient
@@ -660,6 +682,7 @@ def run_questions(
             force=force,
             question_method=question_method,
             report_prompt_prefix=report_prompt_prefix,
+            data_dir=data_dir,
         )
     )
 

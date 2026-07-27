@@ -23,7 +23,17 @@ export function parseLastJSON(stdout: string): Record<string, unknown> | null {
 export function runPythonScript(scriptName: string, args: string[] = []): Promise<PythonRunResult> {
   return new Promise((resolve, reject) => {
     const scriptPath = path.join(process.cwd(), "scripts", scriptName);
-    const commandArgs = ["run", "-n", APP_CONFIG.condaEnv, "python3", "-u", scriptPath, ...args];
+    const commandArgs = [
+      "run",
+      "-n",
+      APP_CONFIG.condaEnv,
+      "python3",
+      "-u",
+      scriptPath,
+      "--data-dir",
+      APP_CONFIG.dataDir,
+      ...args,
+    ];
 
     execFile(
       "conda",
@@ -48,7 +58,17 @@ export function buildPythonCommand(scriptName: string, args: string[] = []) {
   const scriptPath = path.join(process.cwd(), "scripts", scriptName);
   return {
     command: "conda",
-    args: ["run", "-n", APP_CONFIG.condaEnv, "python3", "-u", scriptPath, ...args],
+    args: [
+      "run",
+      "-n",
+      APP_CONFIG.condaEnv,
+      "python3",
+      "-u",
+      scriptPath,
+      "--data-dir",
+      APP_CONFIG.dataDir,
+      ...args,
+    ],
   };
 }
 

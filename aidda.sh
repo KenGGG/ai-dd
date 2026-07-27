@@ -6,7 +6,7 @@ PID_FILE="$ROOT_DIR/.aidda.pid"
 LOG_DIR="$ROOT_DIR/data/logs"
 LOG_FILE="$LOG_DIR/aidda.log"
 PORT="${PORT:-3871}"
-HOST="${HOST:-0.0.0.0}"
+HOST="${HOST:-127.0.0.1}"
 
 cd "$ROOT_DIR"
 mkdir -p "$LOG_DIR"
@@ -33,7 +33,8 @@ Usage:
 
 Environment:
   PORT=3871               Server port.
-  HOST=0.0.0.0            Server host.
+  HOST=127.0.0.1            Server host (default: localhost).
+  AIDDA_TOKEN=<token>       API authentication Bearer token.
 
 URL:
   http://localhost:$PORT

@@ -14,10 +14,12 @@ import path from "path";
 import {
   DATA_DIR,
   createJob,
+  db,
   deleteProject,
   finishJob,
   getProject,
   listProjects,
+  tryStartProjectJob,
   upsertProject,
   updateProject,
 } from "../db.ts";
@@ -198,7 +200,30 @@ function readManifestRows(projectId: string): Array<Record<string, any>> {
     .map((line) => JSON.parse(line));
 }
 
-function hasSufficientSources(projectId: string, config: (typeof RUN_MODES)[RunMode]) {
+function hasSufficientSources(projectId: string, config: (typeof RUN_MODES)[RunMode]): boolean {
+  // Check for a recent source snapshot artifact first
+  try {
+    const snapshot = db
+      .prepare(
+        "SELECT meta_json FROM artifacts WHERE project_id = ? AND kind = 'source_snapshot' ORDER BY id DESC LIMIT 1",
+      )
+      .get(projectId) as { meta_json: string } | undefined;
+    if (snapshot) {
+      const data = JSON.parse(snapshot.meta_json);
+      if (config.recentLimit > 0) {
+        return (
+          data.periodic_ready >= data.periodic_expected &&
+          data.recent_ready >= config.recentLimit &&
+          data.failed_count === 0
+        );
+      }
+      return data.periodic_ready >= data.periodic_expected && data.failed_count === 0;
+    }
+  } catch {
+    // fall through to manifest-based check
+  }
+
+  // Fallback: check manifest records (legacy path)
   const rows = readManifestRows(projectId);
   const readyRows = rows.filter((row) =>
     ["uploaded", "skipped_existing_source"].includes(String(row.upload_status || "")),
@@ -348,6 +373,19 @@ aiddaRouter.get("/projects/:id/report", (req: Request, res: Response) => {
 });
 
 aiddaRouter.delete("/projects/:id", (req: Request, res: Response) => {
+  const project = getProject(req.params.id);
+  if (!project) {
+    deleteProject(req.params.id);
+    res.json({ ok: true });
+    return;
+  }
+
+  // 不允许删除运行中的项目
+  if (["downloading", "uploading", "querying", "synthesizing"].includes(project.status)) {
+    res.status(409).json({ error: "项目正在运行中，无法删除。请等待任务完成或失败后再试。" });
+    return;
+  }
+
   deleteProject(req.params.id);
   res.json({ ok: true });
 });
@@ -358,7 +396,9 @@ aiddaRouter.post(
     const stockCode = String(req.body?.stockCode || "")
       .trim()
       .toUpperCase();
-    if (!stockCode) throw new AppError("股票代码不能为空", 400);
+    if (!stockCode || !/^\d{6}$/.test(stockCode)) {
+      throw new AppError("股票代码必须是六位数字", 400);
+    }
 
     const { stdout } = await runPythonScript("notebooklm_create_project.py", [
       "--stock-code",
@@ -398,7 +438,14 @@ aiddaRouter.post("/projects/:id/run", (req: Request, res: Response) => {
   const restartQuestions = Boolean(req.body?.restartQuestions);
   const config = RUN_MODES[mode] || RUN_MODES.standard;
   const method = questionMethod === "report" ? "report" : "chat";
-  const jobId = createJob(project.id, `run_${mode}_${method}`);
+
+  // CAS 运行锁
+  const jobId = tryStartProjectJob(project.id, `run_${mode}_${method}`);
+  if (jobId === null) {
+    res.status(409).json({ error: "该项目已有任务运行中，请等待当前任务完成或失败后再试。" });
+    return;
+  }
+
   resetRunArtifacts(project.id, restartQuestions);
 
   updateProject(project.id, {
@@ -431,11 +478,23 @@ aiddaRouter.post("/projects/:id/question-rounds/:roundId/retry", (req: Request, 
     throw new AppError("项目缺少股票代码或 NotebookLM 笔记 ID", 400);
   }
 
+  // 不允许在已有任务运行时重试
+  if (["downloading", "uploading", "querying", "synthesizing"].includes(project.status)) {
+    res.status(409).json({ error: "该项目已有任务运行中，无法重试。" });
+    return;
+  }
+
   const roundId = String(req.params.roundId || "").trim();
   const question = readQuestionRounds().find((item) => item.round_id === roundId);
   if (!question) throw new AppError("问题不存在", 404);
 
-  const jobId = createJob(project.id, `retry_round_${roundId}`);
+  // CAS 运行锁（重试也需独占项目）
+  const jobId = tryStartProjectJob(project.id, `retry_round_${roundId}`);
+  if (jobId === null) {
+    res.status(409).json({ error: "该项目已有任务运行中，请等待当前任务完成或失败后再试。" });
+    return;
+  }
+
   resetSingleQuestionArtifacts(project.id, roundId);
 
   updateProject(project.id, {
@@ -515,6 +574,8 @@ async function runDueDiligence(
         "--exclude-title-keywords",
         readAnnouncementFilters().join(","),
         "--wait-ready",
+        "--data-dir",
+        DATA_DIR,
       ],
       logPath,
     );
@@ -544,6 +605,30 @@ async function runDueDiligence(
     error: null,
   });
 
+  // Save source completeness snapshot to artifacts table
+  if (downloadSummary) {
+    try {
+      db.prepare(
+        `INSERT INTO artifacts (project_id, kind, title, status, meta_json)
+         VALUES (?, 'source_snapshot', ?, ?, ?)`,
+      ).run(
+        project.id,
+        `snapshot_${Date.now()}`,
+        "completed",
+        JSON.stringify({
+          periodic_expected: downloadSummary.periodic_expected ?? 0,
+          periodic_ready: downloadSummary.periodic_ready ?? 0,
+          recent_expected: downloadSummary.recent_expected ?? 0,
+          recent_ready: downloadSummary.recent_ready ?? 0,
+          failed_count: downloadSummary.failed_count ?? 0,
+          source_snapshot_hash: JSON.stringify(downloadSummary),
+        }),
+      );
+    } catch {
+      // Non-critical — snapshot failure shouldn't block the pipeline
+    }
+  }
+
   const report = await runPythonScriptLogged(
     "run_aidda_project.py",
     [
@@ -565,6 +650,8 @@ async function runDueDiligence(
       questionMethod,
       ...(questionMethod === "chat" ? ["--max-question-sources", "3"] : []),
       ...(restartQuestions ? ["--force-questions"] : []),
+      "--data-dir",
+      DATA_DIR,
     ],
     logPath,
   );
@@ -616,6 +703,8 @@ async function retryQuestionRound(
       "--question-method",
       questionMethod,
       ...(questionMethod === "chat" ? ["--max-question-sources", "3"] : []),
+      "--data-dir",
+      DATA_DIR,
     ],
     logPath,
   );

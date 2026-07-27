@@ -66,6 +66,8 @@ def normalize_stock_code(code: str) -> str:
     code = code.strip().upper()
     code = re.sub(r'\.(SH|SZ|BJ)$', '', code)
     code = re.sub(r'^(SH|SZ|BJ)', '', code)
+    if not re.fullmatch(r'\d{6}', code):
+        raise ValueError(f"无效股票代码: {code}，必须是六位数字")
     return code
 
 

@@ -58,6 +58,15 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 `);
 
+// Ensure unique index for running job enforcement (partial index, SQLite 3.34+)
+try {
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_running_job ON jobs(project_id) WHERE status = 'running'
+  `);
+} catch {
+  // SQLite version too old for partial indexes — ignore
+}
+
 export interface AiddaProjectRecord {
   id: string;
   name: string;
@@ -228,6 +237,35 @@ export function finishJob(
     WHERE id = ?
   `,
   ).run(status, output, error, id);
+}
+
+/**
+ * CAS: 仅当项目处于空闲或失败状态时，将其锁为运行中并创建 job。
+ * 返回 job id；返回 null 表示项目已被锁定（并发任务正在运行）。
+ */
+export function tryStartProjectJob(projectId: string, jobType: string): number | null {
+  // 先尝试 CAS 更新项目状态 — 只有 idle/failed 的项目可启动新任务
+  const lockRow = db
+    .prepare(
+      `UPDATE projects SET status = 'downloading', updated_at = CURRENT_TIMESTAMP
+     WHERE id = ? AND status IN ('idle', 'failed')`,
+    )
+    .run(projectId);
+
+  if (lockRow.changes === 0) return null;
+
+  try {
+    const j = db
+      .prepare(`INSERT INTO jobs (project_id, type, status) VALUES (?, ?, 'running')`)
+      .run(projectId, jobType);
+    return Number(j.lastInsertRowid);
+  } catch {
+    // 并发插入导致唯一约束冲突
+    db.prepare(
+      `UPDATE projects SET status = 'idle', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    ).run(projectId);
+    return null;
+  }
 }
 
 export function getJob(id: number): any | null {

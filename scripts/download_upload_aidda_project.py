@@ -39,6 +39,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 
+def _validate_safe_path(base_dir: Path, requested: Path) -> Path:
+    """确保解析后的绝对路径仍在 base_dir 下"""
+    resolved = requested.resolve()
+    if not resolved.is_relative_to(base_dir.resolve()):
+        raise ValueError(f"路径穿越风险: {resolved} 不在 {base_dir} 下")
+    return resolved
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="下载巨潮公告 PDF，并逐个上传至 NotebookLM")
     parser.add_argument("--project-id", required=True)
@@ -48,6 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recent-limit", type=int, default=200)
     parser.add_argument("--exclude-title-keywords", default="")
     parser.add_argument("--out-dir", default="data")
+    parser.add_argument("--data-dir", default=None, help="覆盖输出根目录 (由服务端传入)")
     parser.add_argument("--wait-ready", action="store_true", default=True)
     return parser.parse_args()
 
@@ -93,9 +102,9 @@ async def _load_existing_sources(notebook_id: str) -> list[Any]:
 def main() -> None:
     args = parse_args()
     raw_code = normalize_stock_code(args.stock_code)
-    base_dir = Path(args.out_dir)
-    pdf_dir = base_dir / "pdfs" / args.project_id
-    manifest_path = base_dir / "manifests" / f"{args.project_id}_announcements.jsonl"
+    base_dir = Path(args.data_dir) if args.data_dir else Path(args.out_dir)
+    pdf_dir = _validate_safe_path(base_dir / "pdfs", base_dir / "pdfs" / args.project_id)
+    manifest_path = _validate_safe_path(base_dir / "manifests", base_dir / "manifests" / f"{args.project_id}_announcements.jsonl")
     pdf_dir.mkdir(parents=True, exist_ok=True)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -127,6 +136,8 @@ def main() -> None:
     ]
     logger.info("定期报告数量：%s", len(periodic_items))
 
+    periodic_expected = len(periodic_items)
+    recent_expected = 0
     if args.recent_limit > 0:
         logger.info("第二阶段：检索最近 %s 个公告", args.recent_limit)
         recent_anns = cninfo_list_all(
@@ -137,6 +148,7 @@ def main() -> None:
         )
         recent_items = recent_anns[:args.recent_limit]
         logger.info("最近公告数量：%s", len(recent_items))
+        recent_expected = len(recent_items)
     else:
         logger.info("第二阶段：已选择仅同步定期报告，跳过最近公告检索")
         recent_items = []
@@ -172,6 +184,8 @@ def main() -> None:
             existing_source = find_existing_source_by_title(
                 existing_sources,
                 item.get("title", ""),
+                announcement_id=item.get("announcement_id", ""),
+                sha256="",  # SHA not known before download
             )
             if existing_source:
                 rec = {
@@ -270,6 +284,23 @@ def main() -> None:
 
     statuses = [r.get("download_status", "") for r in records]
     upload_statuses = [r.get("upload_status", "") for r in records]
+
+    # 统计每种 source_layer 的 ready 数量
+    periodic_ready = sum(
+        1 for r in records
+        if (r.get("source_layer") in ("periodic_report_3y", "both"))
+        and r.get("upload_status") in ("uploaded", "skipped_existing_source")
+    )
+    recent_ready = sum(
+        1 for r in records
+        if r.get("source_layer") == "recent_200"
+        and r.get("upload_status") in ("uploaded", "skipped_existing_source")
+    )
+    failed_count = sum(
+        1 for s in statuses
+        if s.startswith("download_failed") or s == "failed"
+    ) + sum(1 for s in upload_statuses if s == "upload_failed")
+
     summary = {
         "status": "completed",
         "project_id": args.project_id,
@@ -287,6 +318,11 @@ def main() -> None:
         "manifest_path": str(manifest_path),
         "pdf_dir": str(pdf_dir),
         "notebook_id": args.notebook_id,
+        "periodic_expected": periodic_expected,
+        "periodic_ready": periodic_ready,
+        "recent_expected": recent_expected,
+        "recent_ready": recent_ready,
+        "failed_count": failed_count,
     }
     print(json.dumps(summary, ensure_ascii=False))
 

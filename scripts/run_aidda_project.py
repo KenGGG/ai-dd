@@ -212,6 +212,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="已有项目 ID，用于复用之前下载的 manifest 和答案",
     )
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=None,
+        help="输出根目录 (由服务端传入)",
+    )
 
     return parser.parse_args()
 
@@ -274,6 +280,7 @@ def main() -> None:
     args = parse_args()
 
     # ── 初始化 ──────────────────────────────────────────────────────
+    data_dir = args.data_dir or str(Path(__file__).resolve().parent.parent / "data")
     project_id = args.project_id or generate_project_id(args.stock_code)
     stock_name = args.stock_name or get_stock_name(args.stock_code)
 
@@ -316,6 +323,7 @@ def main() -> None:
         recent_limit=args.recent_limit,
         out_dir=args.out_dir,
         skip_download=args.skip_download,
+        data_dir=data_dir,
     )
     summary.update(download_result)
     manifest_records = None  # 稍后加载
@@ -387,6 +395,7 @@ def main() -> None:
             force=args.force_questions,
             question_method=args.question_method,
             report_prompt_prefix=args.report_prompt_prefix,
+            data_dir=data_dir,
         )
         summary["rounds_total"] = question_result.get("rounds_total", 0)
         summary["rounds_success"] = question_result.get("rounds_success", 0)
@@ -415,6 +424,7 @@ def main() -> None:
             stock_code=args.stock_code,
             stock_name=stock_name,
             skip_report=False,
+            data_dir=data_dir,
         )
         summary["report_path"] = report_result.get("report_path", "")
         summary["unfilled_count"] = report_result.get("unfilled_count", 0)
@@ -429,7 +439,7 @@ def main() -> None:
     logger.info(f"总耗时: {elapsed:.1f} 秒")
 
     # 保存运行摘要
-    summary_path = Path(__file__).resolve().parent.parent / "data" / "projects" / f"{project_id}_summary.json"
+    summary_path = Path(data_dir) / "projects" / f"{project_id}_summary.json"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)

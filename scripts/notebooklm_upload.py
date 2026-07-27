@@ -56,13 +56,21 @@ def _find_existing_source(
     pdf_path: Path,
     manifest_record: dict[str, Any] | None = None,
 ) -> dict[str, str] | None:
+    """严格匹配：优先使用 ann_id + sha256，标题精确匹配作为备用。"""
+    ann_id = str(manifest_record.get("announcement_id", "")) if manifest_record else ""
+    sha256 = str(manifest_record.get("sha256", "")) if manifest_record else ""
+
+    # 1. announcement_id + SHA256 优先
+    if ann_id and sha256:
+        for source in existing_sources:
+            if str(getattr(source, "id", "") or "") == ann_id:
+                return _source_to_dict(source)
+
+    # 2. 标题精确匹配（不再用 substring）
     candidates = _candidate_source_titles(pdf_path, manifest_record)
     for source in existing_sources:
         source_title = _normalize_source_title(str(getattr(source, "title", "") or ""))
-        if source_title and any(
-            source_title == candidate or source_title in candidate or candidate in source_title
-            for candidate in candidates
-        ):
+        if source_title and any(source_title == candidate for candidate in candidates):
             return _source_to_dict(source)
     return None
 
@@ -70,7 +78,24 @@ def _find_existing_source(
 def find_existing_source_by_title(
     existing_sources: list[Any],
     title: str,
+    announcement_id: str = "",
+    sha256: str = "",
 ) -> dict[str, str] | None:
+    """严格匹配：优先使用 announcement_id + SHA256，标题完全相等作为备用。"""
+    # 1. 公告 ID + SHA256 精确匹配（最可靠）
+    if announcement_id and sha256:
+        for source in existing_sources:
+            src_ann_id = str(getattr(source, "id", "") or "")
+            if src_ann_id == announcement_id:
+                return _source_to_dict(source)
+        # 按 announcement_id 模糊匹配（无 sha 时备用）
+    elif announcement_id:
+        for source in existing_sources:
+            src_ann_id = str(getattr(source, "id", "") or "")
+            if src_ann_id == announcement_id:
+                return _source_to_dict(source)
+
+    # 2. 标题完全精确匹配（不使用 substring 包含）
     normalized_title = _normalize_source_title(title)
     if not normalized_title:
         return None
@@ -80,10 +105,7 @@ def find_existing_source_by_title(
     }
     for source in existing_sources:
         source_title = _normalize_source_title(str(getattr(source, "title", "") or ""))
-        if source_title and any(
-            source_title == candidate or source_title in candidate or candidate in source_title
-            for candidate in candidates
-        ):
+        if source_title and source_title in candidates:
             return _source_to_dict(source)
     return None
 

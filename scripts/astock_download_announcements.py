@@ -26,6 +26,14 @@ from .astock_utils import (
     get_report_date_range,
 )
 
+
+def _validate_safe_path(base_dir: Path, requested: Path) -> Path:
+    """确保解析后的绝对路径仍在 base_dir 下"""
+    resolved = requested.resolve()
+    if not resolved.is_relative_to(base_dir.resolve()):
+        raise ValueError(f"路径穿越风险: {resolved} 不在 {base_dir} 下")
+    return resolved
+
 logger = logging.getLogger(__name__)
 
 # ── 常量 ──────────────────────────────────────────────────────────────
@@ -56,6 +64,7 @@ def get_manifest_path(project_id: str) -> Path:
     return MANIFESTS_DIR / f"{project_id}_announcements.jsonl"
 
 
+
 def _download_announcement_pdf(
     item: dict,
     pdf_dir: Path,
@@ -67,8 +76,8 @@ def _download_announcement_pdf(
     ann_id = item.get("announcement_id", "")
     adjunct_url = item.get("adjunct_url", "")
 
-    filename = f"{stock_code}_{date}_{ann_id}_{safe_filename(title)}.pdf"
-    save_path = pdf_dir / filename
+    safe_name = f"{stock_code}_{date}_{ann_id}_{''.join(c for c in title if c.isalnum() or c in ' _-')}.pdf"
+    save_path = _validate_safe_path(pdf_dir.parent, pdf_dir / safe_name)
 
     # 检查是否已下载（同名同大小跳过）
     if save_path.exists():
@@ -99,11 +108,20 @@ def _download_announcement_pdf(
 
 
 def _write_manifest(manifest_path: Path, records: list[dict]) -> None:
-    """写入 manifest JSONL"""
+    """原子写入 manifest JSONL"""
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        for r in records:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    import tempfile
+    tmp_path = manifest_path.with_suffix(".jsonl.tmp")
+    try:
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        tmp_path.rename(manifest_path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
     logger.info(f"Manifest 已写入: {manifest_path} ({len(records)} 条)")
 
 
@@ -174,6 +192,7 @@ def download_announcements(
     recent_limit: int = 200,
     out_dir: str | Path | None = None,
     skip_download: bool = False,
+    data_dir: str | None = None,
 ) -> dict[str, Any]:
     """
     执行公告下载主逻辑。
@@ -186,13 +205,15 @@ def download_announcements(
     logger.info(f"开始下载公告: {raw_code}, project_id={project_id}")
 
     # --- 目录准备 ---
-    if out_dir:
+    if data_dir:
+        base_dir = Path(data_dir)
+    elif out_dir:
         base_dir = Path(out_dir)
     else:
         base_dir = Path(__file__).resolve().parent.parent / "data"
 
-    pdf_dir = base_dir / "pdfs" / project_id
-    manifest_path = base_dir / "manifests" / f"{project_id}_announcements.jsonl"
+    pdf_dir = _validate_safe_path(base_dir / "pdfs", base_dir / "pdfs" / project_id)
+    manifest_path = _validate_safe_path(base_dir / "manifests", base_dir / "manifests" / f"{project_id}_announcements.jsonl")
 
     # skip_download 且已有 manifest → 快速返回
     if skip_download and manifest_path.exists():
