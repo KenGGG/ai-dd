@@ -189,6 +189,11 @@ function buildSourceDetails(projectId: string) {
   };
 }
 
+function toNumber(val: unknown, fallback: number = 0): number {
+  const result = Number(val);
+  return Number.isFinite(result) && result >= 0 ? result : fallback;
+}
+
 function readManifestRows(projectId: string): Array<Record<string, any>> {
   const manifestPath = path.join(DATA_DIR, "manifests", `${projectId}_announcements.jsonl`);
   if (!fs.existsSync(manifestPath)) return [];
@@ -609,20 +614,27 @@ async function runDueDiligence(
 
   // Check source completeness as hard gate before running queries
   if (downloadSummary) {
-    const hasPeriodic =
-      downloadSummary.periodic_ready ?? 0 >= (downloadSummary.periodic_expected ?? 0);
+    const periodicReady = toNumber(downloadSummary.periodic_ready);
+    const periodicExpected = toNumber(downloadSummary.periodic_expected);
+    const recentReady = toNumber(downloadSummary.recent_ready);
+    const recentExpected = toNumber(downloadSummary.recent_expected);
+    const failedCount = toNumber(downloadSummary.failed_count);
+
+    const hasPeriodic = periodicExpected > 0 && periodicReady >= periodicExpected;
     const hasRecent =
-      config.recentLimit > 0 ? (downloadSummary.recent_ready ?? 0) >= config.recentLimit : true;
-    const noFailed = (downloadSummary.failed_count ?? 0) === 0;
+      config.recentLimit > 0
+        ? recentReady >= config.recentLimit
+        : recentExpected > 0 && recentReady >= recentExpected;
+    const noFailed = failedCount === 0;
 
     if (!hasPeriodic || !hasRecent || !noFailed) {
       fs.appendFileSync(
         logPath,
-        `[WARN] 来源完整性不达标：periodic=${downloadSummary.periodic_ready}/${downloadSummary.periodic_expected}, ` +
-          `recent=${downloadSummary.recent_ready}/${config.recentLimit}, failed=${downloadSummary.failed_count}\n`,
+        `[WARN] 来源完整性不达标：periodic=${periodicReady}/${periodicExpected}, ` +
+          `recent=${recentReady}/${recentExpected}, failed=${failedCount}\n`,
         "utf-8",
       );
-      // Still continue but mark as warning — hard gate could be added here if needed
+      // Continue but mark as warning — hard gate could be added here if needed
     } else {
       fs.appendFileSync(logPath, "[OK] 来源完整性达标，继续执行提问。\n", "utf-8");
     }

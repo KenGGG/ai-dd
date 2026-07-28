@@ -62,7 +62,6 @@ export function runPythonScript(
 export function buildPythonCommand(scriptName: string, args: string[] = [], includeDataDir = true) {
   const scriptPath = path.join(process.cwd(), "scripts", scriptName);
   const commandArgs: string[] = [
-    "conda",
     "run",
     "-n",
     APP_CONFIG.condaEnv,

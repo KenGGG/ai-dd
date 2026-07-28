@@ -43,13 +43,7 @@ app.use(errorHandler);
 
 // ── Static assets — PUBLIC after auth middleware but before catch-all ────────
 if (process.env.NODE_ENV !== "production") {
-  const { createServer: createViteServer } = await import("vite");
-  const vite = await createViteServer({
-    server: { middlewareMode: true },
-    appType: "spa",
-  });
-  app.use(vite.middlewares);
-  console.log("Vite development middleware mounted.");
+  // Vite middleware mounted in start()
 } else {
   const distPath = path.join(process.cwd(), "dist");
   // Serve static assets publicly — no auth required
@@ -61,14 +55,18 @@ app.get("*", (_req, res) => {
   if (process.env.NODE_ENV === "production") {
     const distPath = path.join(process.cwd(), "dist");
     res.sendFile(path.join(distPath, "index.html"));
-  } else {
-    // In dev, Vite handles the SPA routing
   }
 });
 
 async function start() {
   if (process.env.NODE_ENV !== "production") {
-    // Vite middleware already mounted above
+    const { createServer: createViteServer } = await import("vite");
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+    console.log("Vite development middleware mounted.");
   } else {
     console.log("Production static server configured.");
   }
