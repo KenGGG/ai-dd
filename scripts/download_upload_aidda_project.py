@@ -33,10 +33,22 @@ from scripts.notebooklm_upload import (
     list_notebook_sources,
     upload_pdf_to_notebook,
 )
+from scripts.source_mappings import (
+    check_and_get_existing_mapping,
+    create_or_update_mapping,
+    get_source_mappings_by_project,
+    init_db,
+)
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+# 初始化 source_mappings 数据库表
+try:
+    init_db()
+except Exception as e:
+    logger.warning(f"source_mappings 数据库初始化失败: {e}")
 
 
 def _validate_safe_path(base_dir: Path, requested: Path) -> Path:
@@ -246,41 +258,84 @@ def main() -> None:
                 seen_sha.add(sha)
 
             if rec.get("download_status") == "downloaded" and rec.get("local_path"):
-                upload_result = asyncio.run(
-                    upload_pdf_to_notebook(
-                        notebook_id=args.notebook_id,
-                        pdf_path=rec["local_path"],
-                        wait_ready=args.wait_ready,
-                        manifest_record=rec,
-                    )
-                )
-                rec["upload_status"] = upload_result.get("status", "")
-                rec["source_id"] = upload_result.get("source_id", "")
-                rec["source_title"] = upload_result.get("source_title", "")
-                rec["ready_status"] = (
-                    "ready"
-                    if upload_result.get("status") in ("uploaded", "skipped_existing_source")
-                    else ""
-                )
-                rec["notebook_id"] = args.notebook_id
-                if upload_result.get("error_message"):
-                    rec["error_message"] = upload_result["error_message"]
-                if upload_result.get("status") in ("uploaded", "skipped_existing_source"):
-                    existing_sources.append(
-                        type(
-                            "NotebookSourceSnapshot",
-                            (),
-                            {
-                                "id": upload_result.get("source_id", ""),
-                                "title": upload_result.get("source_title", ""),
-                                "status": rec["ready_status"],
-                            },
-                        )()
+                # 首先检查 source_mappings 表，看是否已有相同公告/SHA256 的记录
+                project_id = args.project_id
+                ann_id = rec.get("announcement_id", "")
+                sha256 = rec.get("sha256", "")
+                existing_mapping = None
+
+                if ann_id or sha256:
+                    existing_mapping = check_and_get_existing_mapping(
+                        project_id, ann_id if ann_id else None, sha256 if sha256 else None
                     )
 
-            records.append(rec)
-            _write_manifest(manifest_path, records)
-            time.sleep(random.uniform(0.5, 1.0))
+                if existing_mapping:
+                    # 已有映射，跳过上传
+                    rec["upload_status"] = "skipped_existing_source"
+                    rec["source_id"] = existing_mapping["source_id"]
+                    rec["source_title"] = existing_mapping["source_title"] or ""
+                    rec["ready_status"] = "ready"
+                    rec["notebook_id"] = args.notebook_id
+                    rec["error_message"] = ""
+                    logger.info(
+                        "[%s/%s][%s] source_mappings 已有记录，跳过上传：%s",
+                        idx + 1,
+                        len(items),
+                        source_layer,
+                        item.get("title", ""),
+                    )
+                else:
+                    # 需要实际上传
+                    upload_result = asyncio.run(
+                        upload_pdf_to_notebook(
+                            notebook_id=args.notebook_id,
+                            pdf_path=rec["local_path"],
+                            wait_ready=args.wait_ready,
+                            manifest_record=rec,
+                        )
+                    )
+                    rec["upload_status"] = upload_result.get("status", "")
+                    rec["source_id"] = upload_result.get("source_id", "")
+                    rec["source_title"] = upload_result.get("source_title", "")
+                    rec["ready_status"] = (
+                        "ready"
+                        if upload_result.get("status") in ("uploaded", "skipped_existing_source")
+                        else ""
+                    )
+                    rec["notebook_id"] = args.notebook_id
+                    if upload_result.get("error_message"):
+                        rec["error_message"] = upload_result["error_message"]
+                    if upload_result.get("status") in ("uploaded", "skipped_existing_source"):
+                        existing_sources.append(
+                            type(
+                                "NotebookSourceSnapshot",
+                                (),
+                                {
+                                    "id": upload_result.get("source_id", ""),
+                                    "title": upload_result.get("source_title", ""),
+                                    "status": rec["ready_status"],
+                                },
+                            )()
+                        )
+                        # 创建或更新 source_mapping 记录
+                        if project_id and ann_id and sha256:
+                            try:
+                                create_or_update_mapping(
+                                    project_id=project_id,
+                                    announcement_id=ann_id,
+                                    sha256=sha256,
+                                    notebook_id=args.notebook_id,
+                                    source_id=rec["source_id"],
+                                    source_title=rec["source_title"],
+                                    local_path=rec["local_path"],
+                                )
+                                logger.debug(f"已保存 source_mapping: {project_id} -> {rec['source_id']}")
+                            except Exception as e:
+                                logger.warning(f"保存 source_mapping 失败: {e}")
+
+                records.append(rec)
+                _write_manifest(manifest_path, records)
+                time.sleep(random.uniform(0.5, 1.0))
 
     statuses = [r.get("download_status", "") for r in records]
     upload_statuses = [r.get("upload_status", "") for r in records]

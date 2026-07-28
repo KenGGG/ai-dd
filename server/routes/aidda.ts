@@ -22,12 +22,42 @@ import {
   tryStartProjectJob,
   upsertProject,
   updateProject,
+  getSourceMappingsByProject,
 } from "../db.ts";
 import { parseLastJSON, runPythonScript } from "../python.ts";
 import { runPythonScriptLogged } from "../python.ts";
 import { AppError, asyncHandler } from "../middleware/error-handler.ts";
+import { authMiddleware } from "../middleware/auth-middleware.ts";
 
 export const aiddaRouter = Router();
+
+// Health check endpoint (public)
+aiddaRouter.get(
+  "/health",
+  asyncHandler(async (_req: Request, res: Response) => {
+    res.json({
+      status: "healthy",
+      timestamp: new Date().toISOString(),
+      version: "0.1.0",
+      service: "aidda-workbench",
+    });
+  }),
+);
+
+// Privacy endpoint - returns non-sensitive system information (authenticated)
+aiddaRouter.get(
+  "/privacy",
+  authMiddleware,
+  asyncHandler(async (_req: Request, res: Response) => {
+    // Return only non-sensitive info - do NOT expose tokens, paths, or secrets
+    res.json({
+      service: "aidda-workbench",
+      version: "0.1.0",
+      timestamp: new Date().toISOString(),
+      features: ["source-completeness-check", "checkpoint-recovery", "python-process-management"],
+    });
+  }),
+);
 
 type RunMode = "lite" | "standard" | "deep";
 type QuestionMethod = "chat" | "report";
@@ -125,7 +155,18 @@ function attachAnswerContent(manifest: Record<string, unknown>) {
 function countManifestRecords(projectId: string) {
   const manifestPath = path.join(DATA_DIR, "manifests", `${projectId}_announcements.jsonl`);
   if (!fs.existsSync(manifestPath)) {
-    return { manifestPath, total: 0, downloaded: 0, uploaded: 0, failed: 0, filtered: 0 };
+    return {
+      manifestPath,
+      total: 0,
+      discovered: 0,
+      excluded: 0,
+      required: 0,
+      downloaded: 0,
+      uploaded: 0,
+      ready: 0,
+      failed: 0,
+      filtered: 0,
+    };
   }
 
   const records = fs
@@ -135,22 +176,41 @@ function countManifestRecords(projectId: string) {
     .filter(Boolean)
     .map((line) => JSON.parse(line));
 
+  const discovered = records.length;
+  const excluded = records.filter((record) => record.download_status === "skipped_filter").length;
+  const required = records.filter(
+    (record) =>
+      String(record.download_status || "") !== "skipped_filter" &&
+      String(record.download_status || "") !== "skipped_duplicate",
+  ).length;
+  const downloaded = records.filter((record) =>
+    ["downloaded", "skipped_existing_source"].includes(String(record.download_status || "")),
+  ).length;
+  const uploaded = records.filter((record) =>
+    ["uploaded", "skipped_existing_source"].includes(String(record.upload_status || "")),
+  ).length;
+  const ready = records.filter(
+    (record) =>
+      String(record.upload_status || "") === "uploaded" && (record.source_id || record.notebook_id),
+  ).length;
+  const failed = records.filter(
+    (record) =>
+      String(record.download_status || "").startsWith("download_failed") ||
+      record.download_status === "failed" ||
+      String(record.upload_status || "") === "upload_failed",
+  ).length;
+
   return {
     manifestPath,
-    total: records.length,
-    downloaded: records.filter((record) =>
-      ["downloaded", "skipped_existing_source"].includes(record.download_status),
-    ).length,
-    uploaded: records.filter((record) =>
-      ["uploaded", "skipped_existing_source"].includes(record.upload_status),
-    ).length,
-    filtered: records.filter((record) => record.download_status === "skipped_filter").length,
-    failed: records.filter(
-      (record) =>
-        String(record.download_status || "").startsWith("download_failed") ||
-        record.download_status === "failed" ||
-        record.upload_status === "upload_failed",
-    ).length,
+    total: discovered,
+    discovered,
+    excluded,
+    required,
+    downloaded,
+    uploaded,
+    ready,
+    failed,
+    filtered: excluded,
   };
 }
 
@@ -194,7 +254,7 @@ function toNumber(val: unknown, fallback: number = 0): number {
   return Number.isFinite(result) && result >= 0 ? result : fallback;
 }
 
-interface SourceCompletenessInput {
+export interface SourceCompletenessInput {
   periodicReady: number;
   periodicExpected: number;
   recentReady: number;
@@ -203,20 +263,24 @@ interface SourceCompletenessInput {
   recentLimit: number;
 }
 
-interface SourceCompletenessResult {
+export interface SourceCompletenessResult {
   complete: boolean;
   hasPeriodic: boolean;
   hasRecent: boolean;
   noFailed: boolean;
   message: string;
+  failedCount: number;
 }
 
-function evaluateSourceCompleteness(input: SourceCompletenessInput): SourceCompletenessResult {
+export function evaluateSourceCompleteness(
+  input: SourceCompletenessInput,
+): SourceCompletenessResult {
   const { periodicReady, periodicExpected, recentReady, recentExpected, failedCount, recentLimit } =
     input;
 
-  const hasPeriodic = periodicExpected > 0 && periodicReady >= periodicExpected;
-  const hasRecent = recentLimit === 0 || recentReady >= recentExpected;
+  // When expected is 0, consider the check as trivially passed (nothing to verify)
+  const hasPeriodic = periodicExpected === 0 || periodicReady >= periodicExpected;
+  const hasRecent = recentLimit === 0 || (recentExpected > 0 && recentReady >= recentExpected);
   const noFailed = failedCount === 0;
   const complete = hasPeriodic && hasRecent && noFailed;
 
@@ -231,6 +295,7 @@ function evaluateSourceCompleteness(input: SourceCompletenessInput): SourceCompl
     hasRecent,
     noFailed,
     message: complete ? "来源完整性达标" : `来源完整性不达标：${parts.join(", ")}`,
+    failedCount,
   };
 }
 
@@ -417,10 +482,59 @@ aiddaRouter.get("/projects/:id/report", (req: Request, res: Response) => {
   res.json({ content: fs.readFileSync(reportPath, "utf-8"), path: reportPath });
 });
 
+/**
+ * 安全清理项目关联的本地文件。
+ * 只允许在 DATA_DIR 下的指定子目录操作，防止路径穿越。
+ */
+function cleanProjectFiles(projectId: string): boolean {
+  const baseDir = path.resolve(DATA_DIR);
+  const dirsToClean = [
+    path.join(baseDir, "pdfs", projectId),
+    path.join(baseDir, "manifests", `${projectId}_announcements.jsonl`),
+    path.join(baseDir, "answers", projectId),
+    path.join(baseDir, "reports", `${projectId}_dd_report.md`),
+    path.join(baseDir, "logs", `${projectId}_latest.log`),
+  ];
+
+  let allSucceeded = true;
+  for (const dir of dirsToClean) {
+    try {
+      const realPath = path.resolve(dir);
+      // 确保清理目标在 DATA_DIR 下
+      if (!realPath.startsWith(baseDir)) {
+        console.warn(`跳过路径穿透检查: ${dir} for project ${projectId}`);
+        continue;
+      }
+      if (fs.existsSync(dir)) {
+        if (fs.statSync(dir).isDirectory()) {
+          fs.rmSync(dir, { recursive: true, force: true });
+        } else {
+          fs.unlinkSync(dir);
+        }
+      }
+    } catch (err) {
+      console.error(`清理文件失败 ${dir}: ${err}`);
+      allSucceeded = false;
+    }
+  }
+
+  return allSucceeded;
+}
+
 aiddaRouter.delete("/projects/:id", (req: Request, res: Response) => {
-  const project = getProject(req.params.id);
+  const projectId = req.params.id;
+  const deleteFiles = req.query.deleteFiles === "true"; // 支持 ?deleteFiles=true 清理本地文件
+
+  const project = getProject(projectId);
   if (!project) {
-    deleteProject(req.params.id);
+    // 项目不存在，但仍需清理相关的数据库记录（若存在）
+    db.prepare("DELETE FROM jobs WHERE project_id = ?").run(projectId);
+    db.prepare("DELETE FROM artifacts WHERE project_id = ?").run(projectId);
+    db.prepare("DELETE FROM source_mappings WHERE project_id = ?").run(projectId);
+    if (deleteFiles) {
+      // 即使项目不存在，也尝试清理相关文件（幂等操作）
+      cleanProjectFiles(projectId);
+    }
     res.json({ ok: true });
     return;
   }
@@ -431,8 +545,27 @@ aiddaRouter.delete("/projects/:id", (req: Request, res: Response) => {
     return;
   }
 
-  deleteProject(req.params.id);
-  res.json({ ok: true });
+  // 先清理文件（如果请求），再删除数据库记录
+  let cleanupSuccess = true;
+  if (deleteFiles) {
+    cleanupSuccess = cleanProjectFiles(projectId);
+  }
+
+  // 删除数据库记录
+  db.prepare("DELETE FROM jobs WHERE project_id = ?").run(projectId);
+  db.prepare("DELETE FROM artifacts WHERE project_id = ?").run(projectId);
+  db.prepare("DELETE FROM source_mappings WHERE project_id = ?").run(projectId);
+  deleteProject(projectId);
+
+  if (cleanupSuccess) {
+    res.json({ ok: true, message: deleteFiles ? "项目及本地数据已删除" : "项目已删除" });
+  } else {
+    res.status(200).json({
+      ok: true,
+      message: deleteFiles ? "项目已删除，但部分本地文件清理失败" : "项目已删除",
+      warning: "请手动清理剩余文件",
+    });
+  }
 });
 
 aiddaRouter.post(
@@ -587,6 +720,42 @@ aiddaRouter.get(
         },
       });
     }
+  }),
+);
+
+// ── Source Mappings API (authenticated) ─────────────────────────────────────────
+
+aiddaRouter.get(
+  "/projects/:id/source-mappings",
+  authMiddleware,
+  asyncHandler(async (req: Request, res: Response) => {
+    const project = getProject(req.params.id);
+    if (!project) throw new AppError("项目不存在", 404);
+
+    const mappings = getSourceMappingsByProject(project.id);
+    res.json(mappings);
+  }),
+);
+
+aiddaRouter.get(
+  "/projects/:id/source-mappings/count",
+  authMiddleware,
+  asyncHandler(async (req: Request, res: Response) => {
+    const project = getProject(req.params.id);
+    if (!project) throw new AppError("项目不存在", 404);
+
+    // Count mappings by announcement_id and sha256 combined
+    const mappings = getSourceMappingsByProject(project.id);
+    const announcementCount = mappings.filter((m) => m.announcementId).length;
+    const sha256Count = mappings.filter((m) => m.sha256).length;
+    const uniqueCount = mappings.length;
+
+    res.json({
+      project_id: project.id,
+      total_mappings: uniqueCount,
+      by_announcement_id: announcementCount,
+      by_sha256: sha256Count,
+    });
   }),
 );
 

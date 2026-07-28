@@ -1,7 +1,5 @@
-import { execFile, spawn } from "child_process";
-import fs from "fs";
-import path from "path";
 import { APP_CONFIG } from "./config.ts";
+import { pythonExecutor, PythonExecutor } from "./python_executor";
 
 export interface PythonRunResult {
   stdout: string;
@@ -20,106 +18,81 @@ export function parseLastJSON(stdout: string): Record<string, unknown> | null {
   return null;
 }
 
-export function runPythonScript(
+/**
+ * Execute a Python script with timeout and cancellation support.
+ * Uses the unified PythonExecutor for consistent process management.
+ */
+export async function runPythonScript(
   scriptName: string,
   args: string[] = [],
   includeDataDir = true,
+  timeoutMs?: number,
+  signal?: AbortSignal,
 ): Promise<PythonRunResult> {
-  return new Promise((resolve, reject) => {
-    const scriptPath = path.join(process.cwd(), "scripts", scriptName);
-    const commandArgs: string[] = [
-      "run",
-      "-n",
-      APP_CONFIG.condaEnv,
-      "python3",
-      "-u",
-      scriptPath,
-      ...args,
-    ];
-    if (includeDataDir) {
-      commandArgs.push("--data-dir", APP_CONFIG.dataDir);
-    }
-
-    execFile(
-      "conda",
-      commandArgs,
-      {
-        cwd: process.cwd(),
-        maxBuffer: APP_CONFIG.pythonMaxBufferBytes,
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          const message = stderr || error.message;
-          reject(new Error(message));
-          return;
-        }
-        resolve({ stdout, stderr });
-      },
-    );
+  const result = await pythonExecutor.execute(scriptName, args, {
+    includeDataDir,
+    timeoutMs: timeoutMs || APP_CONFIG.pythonTimeoutMs,
+    signal,
   });
+
+  return { stdout: result.stdout, stderr: result.stderr };
 }
 
+/**
+ * Execute a Python script with logging to a file.
+ * Uses the unified PythonExecutor for consistent process management.
+ */
+export async function runPythonScriptLogged(
+  scriptName: string,
+  args: string[],
+  logPath: string,
+  timeoutMs?: number,
+  signal?: AbortSignal,
+): Promise<PythonRunResult> {
+  const result = await pythonExecutor.execute(scriptName, args, {
+    logPath,
+    timeoutMs: timeoutMs || APP_CONFIG.pythonTimeoutMs,
+    signal,
+  });
+
+  return { stdout: result.stdout, stderr: result.stderr };
+}
+
+/**
+ * Build the conda command for a Python script (for direct use or debugging).
+ */
 export function buildPythonCommand(scriptName: string, args: string[] = [], includeDataDir = true) {
-  const scriptPath = path.join(process.cwd(), "scripts", scriptName);
-  const commandArgs: string[] = [
-    "run",
-    "-n",
-    APP_CONFIG.condaEnv,
-    "python3",
-    "-u",
-    scriptPath,
-    ...args,
-  ];
-  if (includeDataDir) {
-    commandArgs.push("--data-dir", APP_CONFIG.dataDir);
-  }
+  const cmd = PythonExecutor.buildCondaCommand(scriptName, args, includeDataDir);
   return {
-    command: "conda",
-    args: commandArgs,
+    command: cmd[0],
+    args: cmd.slice(1),
   };
 }
 
-export function runPythonScriptLogged(
-  scriptName: string,
-  args: string[] = [],
-  logPath: string,
-): Promise<PythonRunResult> {
-  return new Promise((resolve, reject) => {
-    const { command, args: commandArgs } = buildPythonCommand(scriptName, args);
-    fs.mkdirSync(path.dirname(logPath), { recursive: true });
-    fs.appendFileSync(logPath, `\n$ ${command} ${commandArgs.join(" ")}\n`, "utf-8");
+/**
+ * Get information about all currently active Python processes.
+ */
+export function getActivePythonProcesses() {
+  return pythonExecutor.getActiveProcesses();
+}
 
-    const child = spawn(command, commandArgs, {
-      cwd: process.cwd(),
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
+/**
+ * Cancel an active Python process by its internal ID.
+ */
+export function cancelPythonProcess(id: string): boolean {
+  return pythonExecutor.cancelProcess(id);
+}
 
-    child.stdout.on("data", (chunk: Buffer) => {
-      const text = chunk.toString();
-      stdout += text;
-      fs.appendFileSync(logPath, text, "utf-8");
-    });
+/**
+ * Cancel all active Python processes.
+ */
+export function cancelAllPythonProcesses(): number {
+  return pythonExecutor.cancelAll();
+}
 
-    child.stderr.on("data", (chunk: Buffer) => {
-      const text = chunk.toString();
-      stderr += text;
-      fs.appendFileSync(logPath, text, "utf-8");
-    });
-
-    child.on("error", (error) => {
-      fs.appendFileSync(logPath, `\n[process error] ${error.message}\n`, "utf-8");
-      reject(error);
-    });
-
-    child.on("close", (code) => {
-      fs.appendFileSync(logPath, `\n[exit code] ${code}\n`, "utf-8");
-      if (code && code !== 0) {
-        reject(new Error(stderr || stdout || `Python script exited with code ${code}`));
-        return;
-      }
-      resolve({ stdout, stderr });
-    });
-  });
+/**
+ * Gracefully shut down the Python executor.
+ */
+export async function shutdownPythonExecutor(): Promise<void> {
+  await pythonExecutor.shutdown();
 }

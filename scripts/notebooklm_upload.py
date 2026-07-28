@@ -15,7 +15,20 @@ import time
 from pathlib import Path
 from typing import Any
 
+from scripts.source_mappings import (
+    check_and_get_existing_mapping,
+    create_or_update_mapping,
+    get_source_mappings_by_project,
+    init_db,
+)
+
 logger = logging.getLogger(__name__)
+
+# 初始化数据库（确保表存在）
+try:
+    init_db()
+except Exception as e:
+    logger.warning(f"Source mappings 数据库初始化失败: {e}")
 
 
 def _normalize_source_title(title: str | None) -> str:
@@ -55,18 +68,29 @@ def _find_existing_source(
     existing_sources: list[Any],
     pdf_path: Path,
     manifest_record: dict[str, Any] | None = None,
+    project_id: str | None = None,
 ) -> dict[str, str] | None:
-    """严格匹配：优先使用 ann_id + sha256，标题精确匹配作为备用。"""
+    """严格匹配：优先使用 announcement_id + SHA256 检查 source_mappings，标题精确匹配作为备用。"""
     ann_id = str(manifest_record.get("announcement_id", "")) if manifest_record else ""
     sha256 = str(manifest_record.get("sha256", "")) if manifest_record else ""
 
-    # 1. announcement_id + SHA256 优先
+    # 1. 先检查 source_mappings 表（如果有 project_id 和有效的 ann_id/sha256）
+    if project_id and ann_id and sha256:
+        mapping = check_and_get_existing_mapping(project_id, ann_id, sha256)
+        if mapping:
+            return {
+                "source_id": mapping["source_id"],
+                "source_title": mapping["source_title"] or "",
+                "source_status": mapping["status"] or "",
+            }
+
+    # 2. announcement_id + SHA256 优先（NotebookLM 已有 sources）
     if ann_id and sha256:
         for source in existing_sources:
             if str(getattr(source, "id", "") or "") == ann_id:
                 return _source_to_dict(source)
 
-    # 2. 标题精确匹配（不再用 substring）
+    # 3. 标题精确匹配（不再用 substring）
     candidates = _candidate_source_titles(pdf_path, manifest_record)
     for source in existing_sources:
         source_title = _normalize_source_title(str(getattr(source, "title", "") or ""))
@@ -288,11 +312,13 @@ async def upload_all_pdfs(
     wait_ready: bool = True,
     wait_timeout: float = 120.0,
     notebook_title: str = "",
+    project_id: str | None = None,
 ) -> list[dict]:
     """
     上传 manifest 中所有已下载的 PDF 到 NotebookLM。
 
-    返回更新后的 manifest records（含 upload_status, source_id, ready_status）
+    Returns:
+        更新后的 manifest records（含 upload_status, source_id, ready_status）
     """
     from notebooklm import NotebookLMClient
 
@@ -319,7 +345,10 @@ async def upload_all_pdfs(
                 continue
 
             try:
-                existing = _find_existing_source(existing_sources, pdf_path, rec)
+                # 检查是否已在 NotebookLM 或 source_mappings 中存在
+                existing = _find_existing_source(
+                    existing_sources, pdf_path, rec, project_id
+                )
                 if existing:
                     rec["upload_status"] = "skipped_existing_source"
                     rec["source_id"] = existing["source_id"]
@@ -346,6 +375,26 @@ async def upload_all_pdfs(
                 rec["error_message"] = ""
                 existing_sources.append(source)
                 logger.info(f"  [{idx+1}/{len(to_upload)}] ✓ {pdf_path.name}")
+
+                # 保存 source_mapping（如果有 project_id）
+                if project_id:
+                    sha256 = rec.get("sha256", "") or ""
+                    announcement_id = rec.get("announcement_id", "") or ""
+                    local_path = rec.get("local_path", "") or ""
+                    try:
+                        create_or_update_mapping(
+                            project_id=project_id,
+                            announcement_id=announcement_id if announcement_id else None,
+                            sha256=sha256 if sha256 else None,
+                            notebook_id=notebook_id,
+                            source_id=source.id,
+                            source_title=rec.get("source_title", ""),
+                            local_path=local_path,
+                        )
+                        logger.debug(f"  已保存 source_mapping: {project_id} -> {source.id}")
+                    except Exception as e:
+                        logger.warning(f"保存 source_mapping 失败: {e}")
+
             except Exception as e:
                 rec["upload_status"] = "upload_failed"
                 rec["source_id"] = ""
@@ -376,6 +425,7 @@ def run_upload(
     stock_code: str = "",
     stock_name: str = "",
     wait_ready: bool = True,
+    project_id: str | None = None,
 ) -> dict[str, Any]:
     """
     同步执行的 NotebookLM 上传入口。
@@ -425,6 +475,7 @@ def run_upload(
             notebook_id=nb_id,
             manifest_records=manifest_records,
             wait_ready=wait_ready,
+            project_id=project_id,
         )
     )
 

@@ -347,6 +347,7 @@ def main() -> None:
             stock_code=args.stock_code,
             stock_name=stock_name,
             wait_ready=args.wait_ready,
+            project_id=project_id,
         )
 
         if upload_result.get("status") == "auth_failed":

@@ -373,6 +373,12 @@ async def run_all_questions(
         if force and answer_path.exists():
             answer_path.unlink()
             logger.info(f"    已删除旧答案，准备重新提问: {answer_path}")
+            # 当 force 时，强制清空该轮结果的 artifact_id/task_id，避免复用旧结果
+            previous_result = previous_by_round_id.get(round_id, {})
+            if previous_result:
+                previous_result["artifact_id"] = ""
+                previous_result["task_id"] = ""
+                previous_result["question_method"] = method
         elif answer_path.exists() and not prompt_is_unchanged:
             answer_path.unlink()
             logger.info(f"    检测到问题模板已变更，删除旧答案并重新提问: {answer_path}")
@@ -513,6 +519,12 @@ async def run_report_questions(
             if force and answer_path.exists():
                 answer_path.unlink()
                 logger.info(f"    已删除旧答案，准备重新提交报告生成: {answer_path}")
+                # 当 force 时，强制清空该轮结果的 artifact_id/task_id，避免复用旧结果
+                previous_result = previous_by_round_id.get(round_id, {})
+                if previous_result:
+                    previous_result["artifact_id"] = ""
+                    previous_result["task_id"] = ""
+                    previous_result["question_method"] = method
             elif answer_path.exists() and (not prompt_is_unchanged or previous_method != "report"):
                 answer_path.unlink()
                 logger.info(f"    检测到问题模板或问答方式已变更，删除旧答案: {answer_path}")
