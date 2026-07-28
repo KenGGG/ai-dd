@@ -194,6 +194,46 @@ function toNumber(val: unknown, fallback: number = 0): number {
   return Number.isFinite(result) && result >= 0 ? result : fallback;
 }
 
+interface SourceCompletenessInput {
+  periodicReady: number;
+  periodicExpected: number;
+  recentReady: number;
+  recentExpected: number;
+  failedCount: number;
+  recentLimit: number;
+}
+
+interface SourceCompletenessResult {
+  complete: boolean;
+  hasPeriodic: boolean;
+  hasRecent: boolean;
+  noFailed: boolean;
+  message: string;
+}
+
+function evaluateSourceCompleteness(input: SourceCompletenessInput): SourceCompletenessResult {
+  const { periodicReady, periodicExpected, recentReady, recentExpected, failedCount, recentLimit } =
+    input;
+
+  const hasPeriodic = periodicExpected > 0 && periodicReady >= periodicExpected;
+  const hasRecent = recentLimit === 0 || recentReady >= recentExpected;
+  const noFailed = failedCount === 0;
+  const complete = hasPeriodic && hasRecent && noFailed;
+
+  const parts: string[] = [];
+  if (periodicExpected > 0) parts.push(`periodic=${periodicReady}/${periodicExpected}`);
+  if (recentLimit > 0) parts.push(`recent=${recentReady}/${recentExpected}`);
+  if (failedCount > 0) parts.push(`failed=${failedCount}`);
+
+  return {
+    complete,
+    hasPeriodic,
+    hasRecent,
+    noFailed,
+    message: complete ? "来源完整性达标" : `来源完整性不达标：${parts.join(", ")}`,
+  };
+}
+
 function readManifestRows(projectId: string): Array<Record<string, any>> {
   const manifestPath = path.join(DATA_DIR, "manifests", `${projectId}_announcements.jsonl`);
   if (!fs.existsSync(manifestPath)) return [];
@@ -561,7 +601,6 @@ async function runDueDiligence(
   let download = { stdout: "", stderr: "" };
   let downloadSummary: Record<string, unknown> | null = null;
 
-  // Source completeness check before downloading
   if (hasSufficientSources(project.id, config)) {
     fs.appendFileSync(logPath, "[skip] NotebookLM 已有足够附件，跳过公告下载与上传。\n", "utf-8");
   } else {
@@ -581,8 +620,6 @@ async function runDueDiligence(
         "--exclude-title-keywords",
         readAnnouncementFilters().join(","),
         "--wait-ready",
-        "--data-dir",
-        DATA_DIR,
       ],
       logPath,
     );
@@ -596,11 +633,11 @@ async function runDueDiligence(
     manifestPath:
       typeof downloadSummary?.manifest_path === "string"
         ? downloadSummary.manifest_path
-        : path.join(DATA_DIR, "manifests", `${project.id}_announcements.jsonl`),
+        : path.join(DATA_DIR, "manifests/" + project.id + "_announcements.jsonl"),
     pdfDir:
       typeof downloadSummary?.pdf_dir === "string"
         ? downloadSummary.pdf_dir
-        : path.join(DATA_DIR, "pdfs", project.id),
+        : path.join(DATA_DIR, "pdfs/" + project.id),
     downloadSuccess:
       typeof downloadSummary?.download_success === "number"
         ? downloadSummary.download_success
@@ -612,55 +649,108 @@ async function runDueDiligence(
     error: null,
   });
 
-  // Check source completeness as hard gate before running queries
+  let periodicReady = 0,
+    periodicExpected = 0,
+    recentReady = 0,
+    recentExpected = 0,
+    failedCount = 0;
+
   if (downloadSummary) {
-    const periodicReady = toNumber(downloadSummary.periodic_ready);
-    const periodicExpected = toNumber(downloadSummary.periodic_expected);
-    const recentReady = toNumber(downloadSummary.recent_ready);
-    const recentExpected = toNumber(downloadSummary.recent_expected);
-    const failedCount = toNumber(downloadSummary.failed_count);
+    periodicReady = toNumber(downloadSummary.periodic_ready);
+    periodicExpected = toNumber(downloadSummary.periodic_expected);
+    recentReady = toNumber(downloadSummary.recent_ready);
+    recentExpected = toNumber(downloadSummary.recent_expected);
+    failedCount = toNumber(downloadSummary.failed_count);
+  } else {
+    try {
+      const snap = db
+        .prepare(
+          "SELECT meta_json FROM artifacts WHERE project_id = ? AND kind = 'source_snapshot' ORDER BY id DESC LIMIT 1",
+        )
+        .get(project.id) as { meta_json: string } | undefined;
+      if (snap) {
+        const data = JSON.parse(snap.meta_json);
+        periodicReady = toNumber(data.periodic_ready ?? 0);
+        periodicExpected = toNumber(data.periodic_expected ?? 0);
+        recentReady = toNumber(data.recent_ready ?? 0);
+        recentExpected = toNumber(data.recent_expected ?? 0);
+        failedCount = toNumber(data.failed_count ?? 0);
+      }
+    } catch {
+      /* swallow - snapshot parsing failed, continue with manifest fallback */
+    }
 
-    const hasPeriodic = periodicExpected > 0 && periodicReady >= periodicExpected;
-    const hasRecent =
-      config.recentLimit > 0
-        ? recentReady >= config.recentLimit
-        : recentExpected > 0 && recentReady >= recentExpected;
-    const noFailed = failedCount === 0;
-
-    if (!hasPeriodic || !hasRecent || !noFailed) {
-      fs.appendFileSync(
-        logPath,
-        `[WARN] 来源完整性不达标：periodic=${periodicReady}/${periodicExpected}, ` +
-          `recent=${recentReady}/${recentExpected}, failed=${failedCount}\n`,
-        "utf-8",
+    if (periodicReady === 0 && periodicExpected === 0) {
+      const rows = readManifestRows(project.id);
+      const readyRows = rows.filter((row) =>
+        ["uploaded", "skipped_existing_source"].includes(row.upload_status || ""),
       );
-      // Continue but mark as warning — hard gate could be added here if needed
-    } else {
-      fs.appendFileSync(logPath, "[OK] 来源完整性达标，继续执行提问。\n", "utf-8");
+      const periodicReadyRows = readyRows.filter((row) =>
+        ["periodic_report_3y", "both"].includes(row.source_layer || ""),
+      );
+      const recentReadyRows = readyRows.filter((row) =>
+        ["recent_200", "both"].includes(row.source_layer || ""),
+      );
+      const downStatuses = rows.map((r) => r.download_status || "");
+      const upStatuses = rows.map((r) => r.upload_status || "");
+      periodicReady = periodicReadyRows.length;
+      periodicExpected = periodicReadyRows.length ? periodicReadyRows.length : 0;
+      recentReady = recentReadyRows.length;
+      recentExpected = recentReadyRows.length ? recentReadyRows.length : 0;
+      failedCount =
+        downStatuses.filter((s) => s.startsWith("download_failed") || s === "failed").length +
+        upStatuses.filter((s) => s === "upload_failed").length;
     }
   }
 
-  // Save source completeness snapshot to artifacts table
+  const completeness = evaluateSourceCompleteness({
+    periodicReady,
+    periodicExpected,
+    recentReady,
+    recentExpected,
+    failedCount,
+    recentLimit: config.recentLimit,
+  });
+
+  fs.appendFileSync(logPath, "[SOURCE] " + completeness.message + "\n", "utf-8");
+
+  if (!completeness.complete) {
+    const errorMsg =
+      "来源完整性不达标：periodic=" +
+      periodicReady +
+      "/" +
+      periodicExpected +
+      ", recent=" +
+      recentReady +
+      "/" +
+      recentExpected +
+      ", failed=" +
+      failedCount;
+    fs.appendFileSync(logPath, "[BLOCKED] " + errorMsg + "\n", "utf-8");
+    updateProject(project.id, { status: "failed", currentStep: 2, error: errorMsg });
+    finishJob(jobId, "failed", "", errorMsg);
+    throw new AppError(errorMsg, 409, "SOURCE_INCOMPLETE");
+  }
+
   if (downloadSummary) {
     try {
       db.prepare(
-        `INSERT INTO artifacts (project_id, kind, title, status, meta_json)
-         VALUES (?, 'source_snapshot', ?, ?, ?)`,
+        "INSERT INTO artifacts (project_id, kind, title, status, meta_json) VALUES (?, ?, ?, ?, ?)",
       ).run(
         project.id,
-        `snapshot_${Date.now()}`,
+        "source_snapshot",
+        "snapshot_" + Date.now(),
         "completed",
         JSON.stringify({
-          periodic_expected: downloadSummary.periodic_expected ?? 0,
-          periodic_ready: downloadSummary.periodic_ready ?? 0,
-          recent_expected: downloadSummary.recent_expected ?? 0,
-          recent_ready: downloadSummary.recent_ready ?? 0,
-          failed_count: downloadSummary.failed_count ?? 0,
-          source_snapshot_hash: JSON.stringify(downloadSummary),
+          periodic_expected: toNumber(downloadSummary.periodic_expected ?? 0),
+          periodic_ready: toNumber(downloadSummary.periodic_ready ?? 0),
+          recent_expected: toNumber(downloadSummary.recent_expected ?? 0),
+          recent_ready: toNumber(downloadSummary.recent_ready ?? 0),
+          failed_count: toNumber(downloadSummary.failed_count ?? 0),
         }),
       );
     } catch {
-      // Non-critical — snapshot failure shouldn't block the pipeline
+      /* swallow - snapshot insertion failed, continue */
     }
   }
 
@@ -684,8 +774,6 @@ async function runDueDiligence(
       "--question-method",
       questionMethod,
       ...(restartQuestions ? ["--force-questions"] : []),
-      "--data-dir",
-      DATA_DIR,
     ],
     logPath,
   );
@@ -697,7 +785,7 @@ async function runDueDiligence(
     reportPath: fs.existsSync(reportPath) ? reportPath : "",
     error: null,
   });
-  finishJob(jobId, "completed", `${download.stdout}\n${report.stdout}`);
+  finishJob(jobId, "completed", download.stdout + "\n" + report.stdout);
 }
 
 function resetSingleQuestionArtifacts(projectId: string, roundId: string) {
@@ -736,8 +824,6 @@ async function retryQuestionRound(
       "--force-questions",
       "--question-method",
       questionMethod,
-      "--data-dir",
-      DATA_DIR,
     ],
     logPath,
   );

@@ -244,34 +244,65 @@ export function finishJob(
  * 返回 job id；返回 null 表示项目已被锁定（并发任务正在运行）。
  * 允许 idle、failed、completed 状态的项目启动新任务。
  */
+/**
+ * CAS: 使用事务保证原子性。如果项目中已有 running job，返回 null；否则创建 job 并更新项目状态。
+ * 成功返回 job id；失败（唯一约束冲突）返回 null，不修改项目状态。
+ */
+/**
+ * CAS: 使用事务保证原子性。如果项目中已有 running job，返回 null；否则创建 job 并更新项目状态。
+ * 成功返回 job id；失败（唯一约束冲突）返回 null，不修改项目状态。
+ */
+/**
+ * CAS: 使用事务保证原子性。如果项目中已有 running job，返回 null；否则创建 job 并更新项目状态。
+ * 成功返回 job id；失败（唯一约束冲突）返回 null，不修改项目状态。
+ */
+/**
+ * CAS: 仅当项目没有 running job 时，将其锁为运行中并创建 job。
+ * 返回 job id；返回 null 表示项目已被锁定（并发任务正在运行）。
+ * 允许 idle、failed、completed 状态的项目启动新任务。
+ */
+/**
+ * CAS: 仅当项目没有 running job 时，将其锁为运行中并创建 job。
+ * 返回 job id；返回 null 表示项目已被锁定（并发任务正在运行）。
+ * 允许 idle、failed、completed 状态的项目启动新任务。
+ */
+/**
+ * CAS: 仅当项目没有 running job 时，将其锁为运行中并创建 job。
+ * 返回 job id；返回 null 表示项目已被锁定（并发任务正在运行）。
+ * 允许 idle、failed、completed 状态的项目启动新任务。
+ */
+/**
+ * CAS: 仅当项目没有 running job 时，将其锁为运行中并创建 job。
+ * 返回 job id；返回 null 表示项目已被锁定（并发任务正在运行）。
+ * 允许 idle、failed、completed 状态的项目启动新任务。
+ */
+/**
+ * CAS: 仅当项目没有 running job 时，将其锁为运行中并创建 job。
+ * 返回 job id；返回 null 表示项目已被锁定（并发任务正在运行）。
+ * 允许 idle、failed、completed 状态的项目启动新任务。
+ */
 export function tryStartProjectJob(projectId: string, jobType: string): number | null {
-  // 先检查是否已有 running job
-  const running = db
-    .prepare("SELECT id FROM jobs WHERE project_id = ? AND status = 'running'")
-    .get(projectId);
-  if (running) {
-    return null;
-  }
+  let result: number | null = null;
+  db.transaction(() => {
+    const running = db
+      .prepare("SELECT id FROM jobs WHERE project_id = ? AND status = 'running'")
+      .get(projectId);
+    if (running) {
+      result = null;
+      return;
+    }
 
-  // 更新项目状态为 downloading（无论原状态是 idle/failed/completed）
-  db.prepare(
-    `UPDATE projects SET status = 'downloading', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-  ).run(projectId);
-
-  try {
-    const j = db
-      .prepare(`INSERT INTO jobs (project_id, type, status) VALUES (?, ?, 'running')`)
-      .run(projectId, jobType);
-    return Number(j.lastInsertRowid);
-  } catch {
-    // 并发插入导致唯一约束冲突
     db.prepare(
-      `UPDATE projects SET status = 'idle', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      "UPDATE projects SET status = 'downloading', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
     ).run(projectId);
-    return null;
-  }
-}
 
+    const j = db
+      .prepare("INSERT INTO jobs (project_id, type, status) VALUES (?, ?, 'running')")
+      .run(projectId, jobType);
+    result = Number(j.lastInsertRowid);
+  });
+  return result;
+}
 export function getJob(id: number): any | null {
   return db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) || null;
 }

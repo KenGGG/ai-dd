@@ -41,25 +41,11 @@ app.use("/api/aidda", aiddaRouter);
 // Global error handler (must be registered after routes)
 app.use(errorHandler);
 
-// ── Static assets — PUBLIC after auth middleware but before catch-all ────────
-if (process.env.NODE_ENV !== "production") {
-  // Vite middleware mounted in start()
-} else {
-  const distPath = path.join(process.cwd(), "dist");
-  // Serve static assets publicly — no auth required
-  app.use(express.static(distPath));
-}
-
-// ── Catch-all SPA route ────────────────────────────────────────────────────
-app.get("*", (_req, res) => {
-  if (process.env.NODE_ENV === "production") {
-    const distPath = path.join(process.cwd(), "dist");
-    res.sendFile(path.join(distPath, "index.html"));
-  }
-});
+// ── Frontend services: registered inside start() per environment ────────────
 
 async function start() {
   if (process.env.NODE_ENV !== "production") {
+    // Development: Vite middleware must be mounted BEFORE catch-all
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -68,6 +54,13 @@ async function start() {
     app.use(vite.middlewares);
     console.log("Vite development middleware mounted.");
   } else {
+    // Production: static files + SPA fallback
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
+
+    app.get("*", (_req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
     console.log("Production static server configured.");
   }
 
