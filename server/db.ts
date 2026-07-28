@@ -240,19 +240,23 @@ export function finishJob(
 }
 
 /**
- * CAS: 仅当项目处于空闲或失败状态时，将其锁为运行中并创建 job。
+ * CAS: 仅当项目没有 running job 时，将其锁为运行中并创建 job。
  * 返回 job id；返回 null 表示项目已被锁定（并发任务正在运行）。
+ * 允许 idle、failed、completed 状态的项目启动新任务。
  */
 export function tryStartProjectJob(projectId: string, jobType: string): number | null {
-  // 先尝试 CAS 更新项目状态 — 只有 idle/failed 的项目可启动新任务
-  const lockRow = db
-    .prepare(
-      `UPDATE projects SET status = 'downloading', updated_at = CURRENT_TIMESTAMP
-     WHERE id = ? AND status IN ('idle', 'failed')`,
-    )
-    .run(projectId);
+  // 先检查是否已有 running job
+  const running = db
+    .prepare("SELECT id FROM jobs WHERE project_id = ? AND status = 'running'")
+    .get(projectId);
+  if (running) {
+    return null;
+  }
 
-  if (lockRow.changes === 0) return null;
+  // 更新项目状态为 downloading（无论原状态是 idle/failed/completed）
+  db.prepare(
+    `UPDATE projects SET status = 'downloading', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+  ).run(projectId);
 
   try {
     const j = db

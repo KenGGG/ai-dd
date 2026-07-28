@@ -20,20 +20,25 @@ export function parseLastJSON(stdout: string): Record<string, unknown> | null {
   return null;
 }
 
-export function runPythonScript(scriptName: string, args: string[] = []): Promise<PythonRunResult> {
+export function runPythonScript(
+  scriptName: string,
+  args: string[] = [],
+  includeDataDir = true,
+): Promise<PythonRunResult> {
   return new Promise((resolve, reject) => {
     const scriptPath = path.join(process.cwd(), "scripts", scriptName);
-    const commandArgs = [
+    const commandArgs: string[] = [
       "run",
       "-n",
       APP_CONFIG.condaEnv,
       "python3",
       "-u",
       scriptPath,
-      "--data-dir",
-      APP_CONFIG.dataDir,
       ...args,
     ];
+    if (includeDataDir) {
+      commandArgs.push("--data-dir", APP_CONFIG.dataDir);
+    }
 
     execFile(
       "conda",
@@ -54,21 +59,24 @@ export function runPythonScript(scriptName: string, args: string[] = []): Promis
   });
 }
 
-export function buildPythonCommand(scriptName: string, args: string[] = []) {
+export function buildPythonCommand(scriptName: string, args: string[] = [], includeDataDir = true) {
   const scriptPath = path.join(process.cwd(), "scripts", scriptName);
+  const commandArgs: string[] = [
+    "conda",
+    "run",
+    "-n",
+    APP_CONFIG.condaEnv,
+    "python3",
+    "-u",
+    scriptPath,
+    ...args,
+  ];
+  if (includeDataDir) {
+    commandArgs.push("--data-dir", APP_CONFIG.dataDir);
+  }
   return {
     command: "conda",
-    args: [
-      "run",
-      "-n",
-      APP_CONFIG.condaEnv,
-      "python3",
-      "-u",
-      scriptPath,
-      "--data-dir",
-      APP_CONFIG.dataDir,
-      ...args,
-    ],
+    args: commandArgs,
   };
 }
 

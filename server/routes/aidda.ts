@@ -400,10 +400,11 @@ aiddaRouter.post(
       throw new AppError("股票代码必须是六位数字", 400);
     }
 
-    const { stdout } = await runPythonScript("notebooklm_create_project.py", [
-      "--stock-code",
-      stockCode,
-    ]);
+    const { stdout } = await runPythonScript(
+      "notebooklm_create_project.py",
+      ["--stock-code", stockCode],
+      false,
+    );
     const payload = parseLastJSON(stdout);
     if (!payload) throw new AppError("项目创建输出无法解析", 500, "PARSE_ERROR");
 
@@ -526,7 +527,7 @@ aiddaRouter.get(
   asyncHandler(async (_req: Request, res: Response) => {
     const jobId = createJob(null, "notebooklm_status");
     try {
-      const { stdout } = await runPythonScript("notebooklm_auth_status.py");
+      const { stdout } = await runPythonScript("notebooklm_auth_status.py", [], false);
       const status = parseLastJSON(stdout);
       finishJob(jobId, "completed", stdout);
       res.json({ status, output: stdout });
@@ -555,6 +556,7 @@ async function runDueDiligence(
   let download = { stdout: "", stderr: "" };
   let downloadSummary: Record<string, unknown> | null = null;
 
+  // Source completeness check before downloading
   if (hasSufficientSources(project.id, config)) {
     fs.appendFileSync(logPath, "[skip] NotebookLM 已有足够附件，跳过公告下载与上传。\n", "utf-8");
   } else {
@@ -605,6 +607,27 @@ async function runDueDiligence(
     error: null,
   });
 
+  // Check source completeness as hard gate before running queries
+  if (downloadSummary) {
+    const hasPeriodic =
+      downloadSummary.periodic_ready ?? 0 >= (downloadSummary.periodic_expected ?? 0);
+    const hasRecent =
+      config.recentLimit > 0 ? (downloadSummary.recent_ready ?? 0) >= config.recentLimit : true;
+    const noFailed = (downloadSummary.failed_count ?? 0) === 0;
+
+    if (!hasPeriodic || !hasRecent || !noFailed) {
+      fs.appendFileSync(
+        logPath,
+        `[WARN] 来源完整性不达标：periodic=${downloadSummary.periodic_ready}/${downloadSummary.periodic_expected}, ` +
+          `recent=${downloadSummary.recent_ready}/${config.recentLimit}, failed=${downloadSummary.failed_count}\n`,
+        "utf-8",
+      );
+      // Still continue but mark as warning — hard gate could be added here if needed
+    } else {
+      fs.appendFileSync(logPath, "[OK] 来源完整性达标，继续执行提问。\n", "utf-8");
+    }
+  }
+
   // Save source completeness snapshot to artifacts table
   if (downloadSummary) {
     try {
@@ -648,7 +671,6 @@ async function runDueDiligence(
       String(config.maxQuestionRounds),
       "--question-method",
       questionMethod,
-      ...(questionMethod === "chat" ? ["--max-question-sources", "3"] : []),
       ...(restartQuestions ? ["--force-questions"] : []),
       "--data-dir",
       DATA_DIR,
@@ -702,7 +724,6 @@ async function retryQuestionRound(
       "--force-questions",
       "--question-method",
       questionMethod,
-      ...(questionMethod === "chat" ? ["--max-question-sources", "3"] : []),
       "--data-dir",
       DATA_DIR,
     ],

@@ -28,10 +28,15 @@ TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
+def _resolve_data_root(data_dir: str | None = None) -> Path:
+    """获取数据根目录"""
+    return Path(data_dir) if data_dir else DEFAULT_DATA_DIR
+
+
 def _resolve_data_dirs(data_dir: str | None = None) -> tuple[Path, Path]:
-    """解析数据目录和模板目录"""
-    base = Path(data_dir) if data_dir else DEFAULT_DATA_DIR
-    return base / "answers", TEMPLATES_DIR
+    """解析 answers 目录和模板目录"""
+    data_root = _resolve_data_root(data_dir)
+    return data_root / "answers", TEMPLATES_DIR
 
 
 def load_answers(project_id: str, data_dir: str | None = None) -> dict[str, str]:
@@ -159,8 +164,8 @@ def compose_report(
     if skip_report:
         return {"status": "skipped", "report_path": ""}
 
-    data_base, _ = _resolve_data_dirs(data_dir)
-    reports_dir = data_base / "reports"
+    data_root = _resolve_data_root(data_dir)
+    reports_dir = data_root / "reports"
 
     # 1. 读取模板
     _, templates_dir = _resolve_data_dirs(data_dir)
@@ -191,7 +196,7 @@ def compose_report(
 
     # 5a. 加载 manifest 用于附录
     answers_dir_base, _ = _resolve_data_dirs(data_dir)
-    manifest_path = Path(data_dir) / "manifests" / f"{project_id}_announcements.jsonl" if data_dir else (DEFAULT_DATA_DIR / "manifests" / f"{project_id}_announcements.jsonl")
+    manifest_path = data_root / "manifests" / f"{project_id}_announcements.jsonl"
 
     manifest_records = []
     if manifest_path.exists():

@@ -16,9 +16,9 @@ if (recovery.jobsRecovered > 0 || recovery.projectsRecovered > 0) {
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
-// ── Auth middleware ────────────────────────────────────────────
-app.use((req, res, next) => {
-  if (req.path === "/api/health") return next();
+// ── Auth middleware — ONLY apply to /api/aidda routes ────────────────────────
+app.use("/api/aidda", (req, res, next) => {
+  if (req.path === "/health") return next();
   if (!APP_CONFIG.authToken) return next(); // no token configured → allow all
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : header;
@@ -26,7 +26,7 @@ app.use((req, res, next) => {
   res.status(401).json({ error: "未授权" });
 });
 
-app.get("/api/health", (_req, res) => {
+app.get("/api/aidda/health", (_req, res) => {
   res.json({
     ok: true,
     service: APP_CONFIG.serviceName,
@@ -41,21 +41,35 @@ app.use("/api/aidda", aiddaRouter);
 // Global error handler (must be registered after routes)
 app.use(errorHandler);
 
+// ── Static assets — PUBLIC after auth middleware but before catch-all ────────
+if (process.env.NODE_ENV !== "production") {
+  const { createServer: createViteServer } = await import("vite");
+  const vite = await createViteServer({
+    server: { middlewareMode: true },
+    appType: "spa",
+  });
+  app.use(vite.middlewares);
+  console.log("Vite development middleware mounted.");
+} else {
+  const distPath = path.join(process.cwd(), "dist");
+  // Serve static assets publicly — no auth required
+  app.use(express.static(distPath));
+}
+
+// ── Catch-all SPA route ────────────────────────────────────────────────────
+app.get("*", (_req, res) => {
+  if (process.env.NODE_ENV === "production") {
+    const distPath = path.join(process.cwd(), "dist");
+    res.sendFile(path.join(distPath, "index.html"));
+  } else {
+    // In dev, Vite handles the SPA routing
+  }
+});
+
 async function start() {
   if (process.env.NODE_ENV !== "production") {
-    const { createServer: createViteServer } = await import("vite");
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-    console.log("Vite development middleware mounted.");
+    // Vite middleware already mounted above
   } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (_req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
     console.log("Production static server configured.");
   }
 
