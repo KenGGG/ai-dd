@@ -79,7 +79,7 @@ def load_question_rounds(data_dir: str | None = None) -> list[dict]:
     path = templates_dir / "question_rounds.json"
     if not path.exists():
         return []
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         rounds = json.load(f)
     return rounds
 
@@ -90,7 +90,7 @@ def load_answers_manifest(project_id: str, data_dir: str | None = None) -> dict:
     path = answers_dir / project_id / "answers_manifest.json"
     if not path.exists():
         return {}
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -178,7 +178,7 @@ def compose_report(
     answers = load_answers(project_id, data_dir)
 
     if not answers:
-        logger.warning(f"没有找到答案文件，报告将包含全部占位符")
+        logger.warning("没有找到答案文件，报告将包含全部占位符")
 
     # 4. 填充报告大纲
     question_rounds = load_question_rounds(data_dir)
@@ -200,7 +200,7 @@ def compose_report(
 
     manifest_records = []
     if manifest_path.exists():
-        with open(manifest_path, "r", encoding="utf-8") as f:
+        with open(manifest_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
@@ -210,7 +210,7 @@ def compose_report(
                         pass
 
     if manifest_records:
-        rows: list[str] = [f"| 序号 | 公告标题 | 日期 | 类型 | 下载状态 | 上传状态 | NotebookLM Source |"]
+        rows: list[str] = ["| 序号 | 公告标题 | 日期 | 类型 | 下载状态 | 上传状态 | NotebookLM Source |"]
         rows.append("|------|---------|------|------|---------|---------|------------------|")
         for idx, rec in enumerate(manifest_records, 1):
             title = str(rec.get("title", ""))
@@ -220,7 +220,9 @@ def compose_report(
             ul_status = str(rec.get("upload_status", ""))
             source_id = str(rec.get("source_id", ""))[:16]
             rows.append(f"| {idx} | {title} | {date} | {ann_type} | {dl_status} | {ul_status} | {source_id} |")
-        appendix_parts.append(f"\n\n---\n\n# 附录 A：公告引用清单\n\n{'\\n'.join(rows)}")
+        appendix_parts.append(
+            "\n\n---\n\n# 附录 A：公告引用清单\n\n" + "\n".join(rows)
+        )
 
     # 5b. 未填列事项
     unfilled_entries = [
@@ -239,7 +241,7 @@ def compose_report(
     answer_manifest = load_answers_manifest(project_id, data_dir)
     results = answer_manifest.get("results", []) if isinstance(answer_manifest, dict) else []
     if results:
-        rows_r: list[str] = [f"| 轮次 | 问题名称 | 状态 | 错误信息 |"]
+        rows_r: list[str] = ["| 轮次 | 问题名称 | 状态 | 错误信息 |"]
         rows_r.append("|------|---------|------|---------|")
         for r in results:
             round_no = r.get("round_no", "")
@@ -247,7 +249,9 @@ def compose_report(
             status = r.get("status", "")
             error = str(r.get("error_message", ""))[:50]
             rows_r.append(f"| {round_no} | {round_name} | {status} | {error} |")
-        appendix_parts.append(f"\n\n---\n\n# 附录 C：提问执行记录\n\n{'\\n'.join(rows_r)}")
+        appendix_parts.append(
+            "\n\n---\n\n# 附录 C：提问执行记录\n\n" + "\n".join(rows_r)
+        )
 
     # 6. 拼接完整报告
     full_report = report_body + "".join(appendix_parts)

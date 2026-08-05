@@ -5,14 +5,14 @@ a-stock-data 工具函数封装
 """
 import hashlib
 import logging
-import os
+import random
 import re
 import time
-import random
-import requests
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,29 @@ UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 CNINFO_BASE = "https://www.cninfo.com.cn"
 CNINFO_STATIC = "https://static.cninfo.com.cn"
 CNINFO_QUERY_URL = f"{CNINFO_BASE}/new/hisAnnouncement/query"
+
+
+def _retry_http(func, *args, attempts: int = 3, backoff: float = 1.0, **kwargs):
+    """对网络请求函数做指数退避重试，仅重试传输层异常（连接/超时/IO）。
+
+    最终仍失败时抛出最后一个异常，由调用方决定如何降级处理。
+    不引入第三方依赖，仅用标准库 time.sleep。
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return func(*args, **kwargs)
+        except (requests.RequestException, OSError) as e:
+            last_exc = e
+            if attempt < attempts:
+                wait = backoff * (2 ** (attempt - 1))
+                logger.warning(
+                    f"{getattr(func, '__name__', 'http')} 网络请求失败"
+                    f"（第 {attempt}/{attempts} 次），{wait:.1f}s 后重试: {e}"
+                )
+                time.sleep(wait)
+    assert last_exc is not None
+    raise last_exc
 
 # ── 巨潮 orgId 映射（模块级缓存） ──────────────────────────────────────
 _CNINFO_ORGID_MAP: dict[str, str] = {}
@@ -94,7 +117,11 @@ def cninfo_announcements(
         "column": "",
         "category": category,
         "plate": "",
-        "seDate": f"{start_date}~{end_date}" if start_date and end_date else f"2000-01-01~{end_date}" if end_date else f"{start_date}~2030-12-31" if start_date else "",
+        "seDate": (
+            f"{start_date}~{end_date}"
+            if start_date and end_date
+            else f"2000-01-01~{end_date}" if end_date else f"{start_date}~2030-12-31" if start_date else ""
+        ),
         "searchkey": "",
         "secid": "",
         "sortName": "",
@@ -108,10 +135,10 @@ def cninfo_announcements(
         "Origin": CNINFO_BASE,
     }
     try:
-        r = requests.post(CNINFO_QUERY_URL, data=payload, headers=headers, timeout=15)
+        r = _retry_http(requests.post, CNINFO_QUERY_URL, data=payload, headers=headers, timeout=15)
         r.raise_for_status()
         return r.json()
-    except requests.RequestException as e:
+    except (requests.RequestException, OSError) as e:
         logger.error(f"巨潮公告查询失败 {code}: {e}")
         return {"announcements": [], "totalAnnouncement": 0, "hasMore": False}
 
@@ -260,9 +287,9 @@ def download_pdf(
             "User-Agent": UA,
             "Referer": f"{CNINFO_BASE}/new/disclosure",
         }
-        r = requests.get(url, headers=headers, timeout=30, stream=True)
+        r = _retry_http(requests.get, url, headers=headers, timeout=30, stream=True)
         r.raise_for_status()
-    except requests.RequestException as e:
+    except (requests.RequestException, OSError) as e:
         result["error_message"] = f"http_error: {e}"
         return result
 
@@ -294,5 +321,10 @@ def download_pdf(
 def get_report_date_range(years_back: int = 3) -> tuple[str, str]:
     """获取近 N 年的日期范围字符串"""
     today = datetime.now()
-    start = today.replace(year=today.year - years_back)
+    start_year = today.year - years_back
+    try:
+        start = today.replace(year=start_year)
+    except ValueError:
+        # 闰年 2 月 29 日，目标年份非闰年（如 2024→2023）：回退到 2 月 28 日
+        start = today.replace(year=start_year, day=28)
     return start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")

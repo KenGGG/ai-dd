@@ -13,7 +13,6 @@ The data is stored in the same SQLite database used by the Node.js server.
 import os
 import sqlite3
 import sys
-from datetime import datetime
 from pathlib import Path
 
 # Ensure the project root is in the path for direct module use
@@ -25,18 +24,41 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 def get_db_path() -> Path:
     """Get the path to the AIDDA SQLite database."""
-    # The database is used by both Python and Node.js code
-    data_dir = _PROJECT_ROOT / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    return data_dir / "aidda.db"
+    raw_db_path = os.getenv("AIDDA_DB_PATH", "").strip()
+    raw_data_dir = os.getenv("AIDDA_DATA_DIR", "").strip()
+
+    if raw_db_path:
+        path = Path(raw_db_path).expanduser()
+    elif raw_data_dir:
+        path = Path(raw_data_dir).expanduser() / "aidda.sqlite"
+    else:
+        path = _PROJECT_ROOT / "data" / "aidda.sqlite"
+
+    if not path.is_absolute():
+        path = (_PROJECT_ROOT / path).resolve()
+    else:
+        path = path.resolve()
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def connect_db() -> sqlite3.Connection:
+    """Create a unified database connection with proper settings."""
+    conn = sqlite3.connect(
+        get_db_path(),
+        timeout=30,
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    return conn
 
 
 def init_db() -> None:
     """Initialize the source_mappings table if it doesn't exist."""
-    db_path = get_db_path()
-    db = sqlite3.connect(db_path)
-    try:
-        db.executescript("""
+    with connect_db() as conn:
+        conn.executescript("""
             CREATE TABLE IF NOT EXISTS source_mappings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id TEXT NOT NULL,
@@ -50,7 +72,6 @@ def init_db() -> None:
                 status TEXT DEFAULT 'active',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
                 UNIQUE(notebook_id, source_id)
             );
 
@@ -58,25 +79,25 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_source_mapping_announcement ON source_mappings(announcement_id);
             CREATE INDEX IF NOT EXISTS idx_source_mapping_sha256 ON source_mappings(sha256);
         """)
-        db.commit()
-    finally:
-        db.close()
+        conn.commit()
 
 
-def get_source_mappings_by_project(project_id: str) -> list[dict]:
+def get_source_mappings_by_project(
+    project_id: str,
+) -> list[dict]:
     """Get all source mappings for a given project."""
-    db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    try:
-        cursor = conn.prepare(
-            "SELECT * FROM source_mappings WHERE project_id = ? ORDER BY id DESC"
-        )
-        cursor.execute(project_id)
-        rows = cursor.fetchall()
-        return [dict(row) for row in rows]
-    finally:
-        conn.close()
+    with connect_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM source_mappings
+            WHERE project_id = ?
+            ORDER BY id DESC
+            """,
+            (project_id,),
+        ).fetchall()
+
+    return [dict(row) for row in rows]
 
 
 def get_matched_mapping_count(
@@ -85,22 +106,18 @@ def get_matched_mapping_count(
     sha256: str | None,
 ) -> int:
     """Count matched mappings by announcement_id or sha256."""
-    db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
-    try:
-        cursor = conn.prepare(
+    with connect_db() as conn:
+        row = conn.execute(
             """
             SELECT COUNT(*) as cnt FROM source_mappings
             WHERE project_id = ?
               AND (announcement_id = ? OR sha256 = ?)
               AND status = 'active'
-            """
-        )
-        cursor.execute(project_id, announcement_id, sha256)
-        row = cursor.fetchone()
+            """,
+            (project_id, announcement_id, sha256),
+        ).fetchone()
+
         return row[0] if row else 0
-    finally:
-        conn.close()
 
 
 def create_or_update_mapping(
@@ -113,78 +130,118 @@ def create_or_update_mapping(
     local_path: str,
 ) -> None:
     """Create or update a source mapping."""
-    db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
-    try:
-        cursor = conn.prepare(
+    if not project_id:
+        raise ValueError("project_id 不能为空")
+    if not notebook_id:
+        raise ValueError("notebook_id 不能为空")
+    if not source_id:
+        raise ValueError("source_id 不能为空")
+    if not announcement_id and not sha256:
+        raise ValueError(
+            "announcement_id 和 sha256 至少需要一个",
+        )
+
+    with connect_db() as conn:
+        conn.execute(
             """
             INSERT INTO source_mappings (
-                project_id, announcement_id, sha256, notebook_id,
-                source_id, source_title, local_path, status, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(notebook_id, source_id) DO UPDATE SET
+                project_id,
+                announcement_id,
+                sha256,
+                notebook_id,
+                source_id,
+                source_title,
+                local_path,
+                status,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
+            ON CONFLICT(notebook_id, source_id)
+            DO UPDATE SET
+                project_id = excluded.project_id,
                 announcement_id = excluded.announcement_id,
                 sha256 = excluded.sha256,
                 source_title = excluded.source_title,
                 local_path = excluded.local_path,
-                status = excluded.status,
+                status = 'active',
                 updated_at = CURRENT_TIMESTAMP
-            """
-        )
-        cursor.execute(
-            project_id,
-            announcement_id,
-            sha256,
-            notebook_id,
-            source_id,
-            source_title,
-            local_path,
+            """,
+            (
+                project_id,
+                announcement_id,
+                sha256,
+                notebook_id,
+                source_id,
+                source_title,
+                local_path,
+            ),
         )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def clean_mappings_for_project(project_id: str) -> None:
     """Delete all source mappings for a project."""
-    db_path = get_db_path()
-    conn = sqlite3.connect(db_path)
-    try:
-        cursor = conn.prepare("DELETE FROM source_mappings WHERE project_id = ?")
-        cursor.execute(project_id)
+    with connect_db() as conn:
+        conn.execute(
+            "DELETE FROM source_mappings WHERE project_id = ?",
+            (project_id,),
+        )
         conn.commit()
-    finally:
-        conn.close()
 
 
 def check_and_get_existing_mapping(
     project_id: str,
+    notebook_id: str,
     announcement_id: str | None,
     sha256: str | None,
-    notebook_id: str | None = None,
 ) -> dict | None:
     """
-    Check if there's an existing mapping for the given announcement_id or sha256.
-    Returns the mapping dict if found, otherwise None.
+    Check if there's an existing mapping for the given announcement_id or sha256
+    in the specified notebook. Returns the mapping dict if found, otherwise None.
     """
-    # First try matching by announcement_id
-    if announcement_id:
-        count = get_matched_mapping_count(project_id, announcement_id, None)
-        if count > 0:
-            mappings = get_source_mappings_by_project(project_id)
-            for m in mappings:
-                if m.get("announcement_id") == announcement_id and m.get("status") == "active":
-                    if notebook_id is None or m.get("notebook_id") == notebook_id:
-                        return m
+    with connect_db() as conn:
+        if announcement_id:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM source_mappings
+                WHERE project_id = ?
+                  AND notebook_id = ?
+                  AND announcement_id = ?
+                  AND status = 'active'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (
+                    project_id,
+                    notebook_id,
+                    announcement_id,
+                ),
+            ).fetchone()
 
-    # Then try matching by sha256
-    if sha256:
-        count = get_matched_mapping_count(project_id, None, sha256)
-        if count > 0:
-            mappings = get_source_mappings_by_project(project_id)
-            for m in mappings:
-                if m.get("sha256") == sha256 and m.get("status") == "active":
-                    if notebook_id is None or m.get("notebook_id") == notebook_id:
-                        return m
+            if row:
+                return dict(row)
+
+        if sha256:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM source_mappings
+                WHERE project_id = ?
+                  AND notebook_id = ?
+                  AND sha256 = ?
+                  AND status = 'active'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (
+                    project_id,
+                    notebook_id,
+                    sha256,
+                ),
+            ).fetchone()
+
+            if row:
+                return dict(row)
 
     return None

@@ -18,7 +18,6 @@ from scripts.astock_utils import normalize_stock_code
 from scripts.notebooklm_upload import check_notebooklm_auth, get_or_create_notebook
 from scripts.run_aidda_project import get_stock_name
 
-
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 logger = logging.getLogger(__name__)
 

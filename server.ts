@@ -1,9 +1,11 @@
 import express from "express";
 import path from "path";
 import { APP_CONFIG } from "./server/config.ts";
-import { DB_PATH, recoverInterruptedJobs } from "./server/db.ts";
+import { DB_PATH, recoverInterruptedJobs, db } from "./server/db.ts";
 import { aiddaRouter } from "./server/routes/aidda.ts";
+import { pythonExecutor } from "./server/python_executor.ts";
 import { errorHandler } from "./server/middleware/error-handler.ts";
+import { aiddaAuthMiddleware } from "./server/middleware/auth-middleware.ts";
 
 const app = express();
 const recovery = recoverInterruptedJobs();
@@ -17,21 +19,13 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
 // ── Auth middleware — ONLY apply to /api/aidda routes ────────────────────────
-app.use("/api/aidda", (req, res, next) => {
-  if (req.path === "/health") return next();
-  if (!APP_CONFIG.authToken) return next(); // no token configured → allow all
-  const header = req.headers.authorization || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : header;
-  if (token === APP_CONFIG.authToken) return next();
-  res.status(401).json({ error: "未授权" });
-});
+app.use("/api/aidda", aiddaAuthMiddleware);
 
 app.get("/api/aidda/health", (_req, res) => {
   res.json({
     ok: true,
     service: APP_CONFIG.serviceName,
-    database: DB_PATH,
-    condaEnv: APP_CONFIG.condaEnv,
+    version: "0.1.0",
     time: new Date().toISOString(),
   });
 });
@@ -74,3 +68,25 @@ start().catch((err) => {
   console.error("Failed to start server:", err);
   process.exit(1);
 });
+
+// ── Graceful shutdown ─────────────────────────────────────────────────────────
+let shuttingDown = false;
+async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Received ${signal}, shutting down gracefully...`);
+  try {
+    await pythonExecutor.shutdown();
+  } catch (err) {
+    console.error("Error during Python executor shutdown:", err);
+  }
+  try {
+    db.close();
+  } catch (err) {
+    console.error("Error closing database:", err);
+  }
+  process.exit(0);
+}
+
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));

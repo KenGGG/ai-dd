@@ -9,16 +9,13 @@ NotebookLM 上传模块 — 使用 notebooklm-py 上传 PDF 到 NotebookLM
 5. 记录上传和处理状态到 manifest
 """
 import asyncio
-import json
 import logging
-import time
 from pathlib import Path
 from typing import Any
 
 from scripts.source_mappings import (
     check_and_get_existing_mapping,
     create_or_update_mapping,
-    get_source_mappings_by_project,
     init_db,
 )
 
@@ -69,14 +66,20 @@ def _find_existing_source(
     pdf_path: Path,
     manifest_record: dict[str, Any] | None = None,
     project_id: str | None = None,
+    notebook_id: str | None = None,
 ) -> dict[str, str] | None:
     """严格匹配：优先使用 announcement_id + SHA256 检查 source_mappings，标题精确匹配作为备用。"""
     ann_id = str(manifest_record.get("announcement_id", "")) if manifest_record else ""
     sha256 = str(manifest_record.get("sha256", "")) if manifest_record else ""
 
-    # 1. 先检查 source_mappings 表（如果有 project_id 和有效的 ann_id/sha256）
-    if project_id and ann_id and sha256:
-        mapping = check_and_get_existing_mapping(project_id, ann_id, sha256)
+    # 1. 先检查 source_mappings 表（如果有 project_id、notebook_id 和有效的 ann_id/sha256）
+    if project_id and notebook_id and (ann_id or sha256):
+        mapping = check_and_get_existing_mapping(
+            project_id=project_id,
+            notebook_id=notebook_id,
+            announcement_id=ann_id if ann_id else None,
+            sha256=sha256 if sha256 else None,
+        )
         if mapping:
             return {
                 "source_id": mapping["source_id"],
@@ -142,21 +145,66 @@ async def list_notebook_sources(client: Any, notebook_id: str) -> list[Any]:
         return []
 
 
+def _is_transport_error(exc: Exception) -> bool:
+    """判断是否为传输层/网络层错误（可重试），而非认证/授权错误。"""
+    import socket
+
+    if isinstance(exc, (OSError, socket.gaierror, asyncio.TimeoutError)):
+        return True
+    msg = str(exc).lower()
+    # 认证/授权类错误：不应重试
+    auth_hints = (
+        "unauthor", "401", "403", "forbidden", "auth", "login",
+        "token", "credential", "not logged", "未登录", "失效",
+    )
+    if any(h in msg for h in auth_hints):
+        return False
+    # 其余网络类关键词视为可重试
+    transport_hints = (
+        "connection", "connect", "timeout", "timed out", "reset",
+        "aborted", "network", "name or service", "resolve",
+    )
+    if any(h in msg for h in transport_hints):
+        return True
+    # 未知异常默认按认证错误处理，避免对不明错误无限重试
+    return False
+
+
 async def check_notebooklm_auth() -> bool:
     """
     检查 NotebookLM 登录状态。
-    返回 True 表示已登录可用，False 表示未登录或失效。
-    """
-    try:
-        from notebooklm import NotebookLMClient
+    返回 True 表示已登录可用，False 表示未登录/失效或持续网络错误。
 
-        async with NotebookLMClient.from_storage() as client:
-            notebooks = await client.notebooks.list()
-            logger.info(f"NotebookLM 登录正常，可访问 {len(notebooks)} 个笔记")
-            return True
-    except Exception as e:
-        logger.error(f"NotebookLM 登录检查失败: {e}")
-        return False
+    传输层（连接/超时）错误会进行少量退避重试，并在日志中与认证错误区分：
+    账号类错误以 error 记录并立即失败，网络类错误以 warning 记录并允许重试。
+    """
+    from notebooklm import NotebookLMClient
+
+    attempts = 3
+    backoff = 1.0
+    for attempt in range(1, attempts + 1):
+        try:
+            async with NotebookLMClient.from_storage() as client:
+                notebooks = await client.notebooks.list()
+                logger.info(f"NotebookLM 登录正常，可访问 {len(notebooks)} 个笔记")
+                return True
+        except Exception as e:  # noqa: BLE001
+            if _is_transport_error(e):
+                if attempt < attempts:
+                    wait = backoff * (2 ** (attempt - 1))
+                    logger.warning(
+                        f"NotebookLM 登录检查网络错误（第 {attempt}/{attempts} 次），"
+                        f"{wait:.1f}s 后重试: {e}"
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                logger.warning(
+                    f"NotebookLM 登录检查因持续网络错误失败（已重试 {attempts} 次）: {e}"
+                )
+            else:
+                logger.error(f"NotebookLM 登录检查失败（认证/授权问题）: {e}")
+            break
+    return False
 
 
 async def get_or_create_notebook(
@@ -275,6 +323,7 @@ async def upload_pdf_to_notebook(
                 await list_notebook_sources(client, notebook_id),
                 pdf_path,
                 manifest_record,
+                notebook_id=notebook_id,
             )
             if existing:
                 return {
@@ -347,7 +396,7 @@ async def upload_all_pdfs(
             try:
                 # 检查是否已在 NotebookLM 或 source_mappings 中存在
                 existing = _find_existing_source(
-                    existing_sources, pdf_path, rec, project_id
+                    existing_sources, pdf_path, rec, project_id, notebook_id
                 )
                 if existing:
                     rec["upload_status"] = "skipped_existing_source"

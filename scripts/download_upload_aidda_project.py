@@ -3,7 +3,7 @@ AIDDA 公告下载 + 即时 NotebookLM 上传编排脚本。
 
 顺序：
 1. 查询并下载近三年定期报告；
-2. 每成功下载一个 PDF，立即上传到指定 NotebookLM 笔记；
+2. 每成功下载一个 PDF，立即上传至指定 NotebookLM 笔记；
 3. 查询并下载最近 N 个公告；
 4. 每成功下载一个 PDF，立即上传；
 5. 持续写入 manifest，便于前端轮询状态。
@@ -33,13 +33,12 @@ from scripts.notebooklm_upload import (
     list_notebook_sources,
     upload_pdf_to_notebook,
 )
+from scripts.path_utils import _validate_safe_path
 from scripts.source_mappings import (
     check_and_get_existing_mapping,
     create_or_update_mapping,
-    get_source_mappings_by_project,
     init_db,
 )
-
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -49,14 +48,6 @@ try:
     init_db()
 except Exception as e:
     logger.warning(f"source_mappings 数据库初始化失败: {e}")
-
-
-def _validate_safe_path(base_dir: Path, requested: Path) -> Path:
-    """确保解析后的绝对路径仍在 base_dir 下"""
-    resolved = requested.resolve()
-    if not resolved.is_relative_to(base_dir.resolve()):
-        raise ValueError(f"路径穿越风险: {resolved} 不在 {base_dir} 下")
-    return resolved
 
 
 def parse_args() -> argparse.Namespace:
@@ -111,21 +102,91 @@ async def _load_existing_sources(notebook_id: str) -> list[Any]:
         return await list_notebook_sources(client, notebook_id)
 
 
+# ── 状态定义 ────────────────────────────────────────────────────────────────
+
+READY_UPLOAD_STATUSES = {
+    "uploaded",
+    "skipped_existing_source",
+}
+
+EXCLUDED_DOWNLOAD_STATUSES = {
+    "skipped_filter",
+    "skipped_duplicate",
+}
+
+DOWNLOAD_FAILURE_STATUSES = {
+    "failed",
+}
+
+
+def has_layer(record: dict, layer: str) -> bool:
+    current = str(record.get("source_layer", ""))
+    return current == layer or current == "both"
+
+
+def is_required_record(record: dict, layer: str) -> bool:
+    if not has_layer(record, layer):
+        return False
+
+    return (
+        record.get("download_status")
+        not in EXCLUDED_DOWNLOAD_STATUSES
+    )
+
+
+def is_ready_record(record: dict) -> bool:
+    return (
+        record.get("upload_status")
+        in READY_UPLOAD_STATUSES
+    )
+
+
+def is_failed_record(record: dict) -> bool:
+    download_status = str(
+        record.get("download_status", ""),
+    )
+    upload_status = str(
+        record.get("upload_status", ""),
+    )
+
+    return (
+        download_status == "failed"
+        or download_status.startswith("download_failed")
+        or upload_status == "upload_failed"
+    )
+
+
+def merge_source_layer(
+    current: str,
+    incoming: str,
+) -> str:
+    if not current:
+        return incoming
+    if current == incoming:
+        return current
+    return "both"
+
+
 def main() -> None:
     args = parse_args()
     raw_code = normalize_stock_code(args.stock_code)
     base_dir = Path(args.data_dir) if args.data_dir else Path(args.out_dir)
     pdf_dir = _validate_safe_path(base_dir / "pdfs", base_dir / "pdfs" / args.project_id)
-    manifest_path = _validate_safe_path(base_dir / "manifests", base_dir / "manifests" / f"{args.project_id}_announcements.jsonl")
+    manifest_path = _validate_safe_path(
+        base_dir / "manifests", base_dir / "manifests" / f"{args.project_id}_announcements.jsonl"
+    )
     pdf_dir.mkdir(parents=True, exist_ok=True)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
     start_date, end_date = get_report_date_range(args.periodic_years)
     records: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    seen_urls: set[str] = set()
-    seen_sha: set[str] = set()
+    # Use dicts instead of sets to track canonical records for merging source layers
+    seen_ids: dict[str, dict] = {}
+    seen_urls: dict[str, dict] = {}
+    seen_sha: dict[str, dict] = {}
     filter_terms = _parse_filter_terms(args.exclude_title_keywords)
+
+    # Load existing NotebookLM sources
     try:
         existing_sources = asyncio.run(_load_existing_sources(args.notebook_id))
         logger.info("NotebookLM 已有附件数量：%s", len(existing_sources))
@@ -133,6 +194,7 @@ def main() -> None:
         existing_sources = []
         logger.warning("读取 NotebookLM 已有附件失败，将继续按本地流程处理: %s", e)
 
+    # Periodic reports (3 years)
     logger.info("第一阶段：检索近三年定期报告")
     periodic_anns = cninfo_list_all(
         code=raw_code,
@@ -148,7 +210,8 @@ def main() -> None:
     ]
     logger.info("定期报告数量：%s", len(periodic_items))
 
-    periodic_expected = len(periodic_items)
+    # Recent announcements
+    recent_items = []
     recent_expected = 0
     if args.recent_limit > 0:
         logger.info("第二阶段：检索最近 %s 个公告", args.recent_limit)
@@ -160,10 +223,9 @@ def main() -> None:
         )
         recent_items = recent_anns[:args.recent_limit]
         logger.info("最近公告数量：%s", len(recent_items))
-        recent_expected = len(recent_items)
     else:
         logger.info("第二阶段：已选择仅同步定期报告，跳过最近公告检索")
-        recent_items = []
+
     if filter_terms:
         logger.info("公告标题过滤词：%s", "、".join(filter_terms))
 
@@ -172,11 +234,14 @@ def main() -> None:
         ("recent_200", recent_items),
     ]
 
+    # Process each stage in order
     for source_layer, items in stages:
         logger.info("开始处理资料池：%s", source_layer)
         for idx, item in enumerate(items):
             ann_id, url = _dedupe_key(item)
             matched_term = _matched_filter(item.get("title", ""), filter_terms)
+
+            # 1. Filter by title (only for recent items)
             if matched_term and source_layer == "recent_200":
                 rec = {
                     "announcement_id": ann_id,
@@ -193,6 +258,42 @@ def main() -> None:
                 _write_manifest(manifest_path, records)
                 continue
 
+            # 2. Check ID/URL duplicate
+            canonical: dict | None = None
+            if ann_id and ann_id in seen_ids:
+                canonical = seen_ids[ann_id]
+            elif url and url in seen_urls:
+                canonical = seen_urls[url]
+
+            if canonical:
+                # Merge source layers
+                canonical["source_layer"] = merge_source_layer(
+                    str(canonical.get("source_layer", "")),
+                    source_layer,
+                )
+
+                duplicate = {
+                    "announcement_id": ann_id,
+                    "title": item.get("title", ""),
+                    "date": item.get("date", ""),
+                    "adjunct_url": url,
+                    "local_path": "",
+                    "sha256": "",
+                    "download_status": "skipped_duplicate",
+                    "upload_status": "skipped",
+                    "duplicate_of": (
+                        canonical.get("announcement_id")
+                        or canonical.get("sha256")
+                        or canonical.get("source_id")
+                    ),
+                    "error_message": "",
+                }
+                duplicate = _base_record(item, duplicate, raw_code, args.project_id, "both")
+                records.append(duplicate)
+                _write_manifest(manifest_path, records)
+                continue
+
+            # 3. Check existing NotebookLM source by title
             existing_source = find_existing_source_by_title(
                 existing_sources,
                 item.get("title", ""),
@@ -215,7 +316,14 @@ def main() -> None:
                     "notebook_id": args.notebook_id,
                     "error_message": "",
                 }
-                records.append(_base_record(item, rec, raw_code, args.project_id, source_layer))
+                rec = _base_record(item, rec, raw_code, args.project_id, source_layer)
+                records.append(rec)
+
+                if ann_id:
+                    seen_ids[ann_id] = rec
+                if url:
+                    seen_urls[url] = rec
+
                 _write_manifest(manifest_path, records)
                 logger.info(
                     "[%s/%s][%s] NotebookLM 已有附件，跳过下载上传：%s",
@@ -226,51 +334,48 @@ def main() -> None:
                 )
                 continue
 
-            if (ann_id and ann_id in seen_ids) or (url and url in seen_urls):
-                rec = {
-                    "announcement_id": ann_id,
-                    "title": item.get("title", ""),
-                    "date": item.get("date", ""),
-                    "adjunct_url": url,
-                    "local_path": "",
-                    "sha256": "",
-                    "download_status": "skipped_duplicate",
-                    "error_message": "",
-                }
-                records.append(_base_record(item, rec, raw_code, args.project_id, "both"))
-                _write_manifest(manifest_path, records)
-                continue
-
+            # 4. Download
             logger.info("[%s/%s][%s] 下载：%s", idx + 1, len(items), source_layer, item.get("title", ""))
             rec = _download_announcement_pdf(item, pdf_dir, raw_code)
             rec = _base_record(item, rec, raw_code, args.project_id, source_layer)
 
             if ann_id:
-                seen_ids.add(ann_id)
+                seen_ids[ann_id] = rec
             if url:
-                seen_urls.add(url)
+                seen_urls[url] = rec
 
+            # 5. SHA duplicate check
             sha = rec.get("sha256", "")
             if sha and sha in seen_sha:
+                canonical_sha = seen_sha[sha]
+                canonical_sha["source_layer"] = merge_source_layer(
+                    str(canonical_sha.get("source_layer", "")),
+                    source_layer,
+                )
                 rec["download_status"] = "skipped_duplicate"
-                rec["source_layer"] = "both"
-            elif sha:
-                seen_sha.add(sha)
+                rec["upload_status"] = "skipped_duplicate"
+                rec["duplicate_of"] = sha
+                records.append(rec)
+                _write_manifest(manifest_path, records)
+            elif rec.get("download_status") == "downloaded" and rec.get("local_path"):
+                if sha:
+                    seen_sha[sha] = rec
 
-            if rec.get("download_status") == "downloaded" and rec.get("local_path"):
-                # 首先检查 source_mappings 表，看是否已有相同公告/SHA256 的记录
-                project_id = args.project_id
+                # 6. Upload
+                existing_mapping = None
                 ann_id = rec.get("announcement_id", "")
                 sha256 = rec.get("sha256", "")
-                existing_mapping = None
 
                 if ann_id or sha256:
                     existing_mapping = check_and_get_existing_mapping(
-                        project_id, ann_id if ann_id else None, sha256 if sha256 else None
+                        project_id=args.project_id,
+                        notebook_id=args.notebook_id,
+                        announcement_id=ann_id if ann_id else None,
+                        sha256=sha256 if sha256 else None,
                     )
 
                 if existing_mapping:
-                    # 已有映射，跳过上传
+                    # Already mapped, skip upload
                     rec["upload_status"] = "skipped_existing_source"
                     rec["source_id"] = existing_mapping["source_id"]
                     rec["source_title"] = existing_mapping["source_title"] or ""
@@ -285,7 +390,7 @@ def main() -> None:
                         item.get("title", ""),
                     )
                 else:
-                    # 需要实际上传
+                    # Need to upload
                     upload_result = asyncio.run(
                         upload_pdf_to_notebook(
                             notebook_id=args.notebook_id,
@@ -305,7 +410,9 @@ def main() -> None:
                     rec["notebook_id"] = args.notebook_id
                     if upload_result.get("error_message"):
                         rec["error_message"] = upload_result["error_message"]
+
                     if upload_result.get("status") in ("uploaded", "skipped_existing_source"):
+                        # Append to existing_sources for deduplication in this batch
                         existing_sources.append(
                             type(
                                 "NotebookSourceSnapshot",
@@ -317,44 +424,80 @@ def main() -> None:
                                 },
                             )()
                         )
-                        # 创建或更新 source_mapping 记录
-                        if project_id and ann_id and sha256:
-                            try:
-                                create_or_update_mapping(
-                                    project_id=project_id,
-                                    announcement_id=ann_id,
-                                    sha256=sha256,
-                                    notebook_id=args.notebook_id,
-                                    source_id=rec["source_id"],
-                                    source_title=rec["source_title"],
-                                    local_path=rec["local_path"],
-                                )
-                                logger.debug(f"已保存 source_mapping: {project_id} -> {rec['source_id']}")
-                            except Exception as e:
-                                logger.warning(f"保存 source_mapping 失败: {e}")
+                        # Create/update source_mapping
+                        try:
+                            create_or_update_mapping(
+                                project_id=args.project_id,
+                                announcement_id=ann_id if ann_id else None,
+                                sha256=sha256 if sha256 else None,
+                                notebook_id=args.notebook_id,
+                                source_id=rec["source_id"],
+                                source_title=rec["source_title"],
+                                local_path=rec["local_path"],
+                            )
+                            logger.debug(f"已保存 source_mapping: {args.project_id} -> {rec['source_id']}")
+                        except Exception as e:
+                            logger.warning(f"保存 source_mapping 失败: {e}")
 
                 records.append(rec)
                 _write_manifest(manifest_path, records)
                 time.sleep(random.uniform(0.5, 1.0))
 
-    statuses = [r.get("download_status", "") for r in records]
-    upload_statuses = [r.get("upload_status", "") for r in records]
+    # Calculate statistics based on actual required records
+    # First, determine which records are required for each layer
+    periodic_required_records = [
+        record
+        for record in records
+        if is_required_record(
+            record,
+            "periodic_report_3y",
+        )
+    ]
 
-    # 统计每种 source_layer 的 ready 数量
+    recent_required_records = [
+        record
+        for record in records
+        if is_required_record(
+            record,
+            "recent_200",
+        )
+    ]
+
+    periodic_expected = len(periodic_required_records)
     periodic_ready = sum(
-        1 for r in records
-        if (r.get("source_layer") in ("periodic_report_3y", "both"))
-        and r.get("upload_status") in ("uploaded", "skipped_existing_source")
+        1
+        for record in periodic_required_records
+        if is_ready_record(record)
     )
+
+    recent_expected = len(recent_required_records)
     recent_ready = sum(
-        1 for r in records
-        if r.get("source_layer") == "recent_200"
-        and r.get("upload_status") in ("uploaded", "skipped_existing_source")
+        1
+        for record in recent_required_records
+        if is_ready_record(record)
     )
+
     failed_count = sum(
-        1 for s in statuses
-        if s.startswith("download_failed") or s == "failed"
-    ) + sum(1 for s in upload_statuses if s == "upload_failed")
+        1
+        for record in records
+        if (
+            (
+                is_required_record(
+                    record,
+                    "periodic_report_3y",
+                )
+                or is_required_record(
+                    record,
+                    "recent_200",
+                )
+            )
+            and is_failed_record(record)
+        )
+    )
+
+    # Count excluded and duplicates
+    excluded_count = sum(1 for r in records if r.get("download_status") == "skipped_filter")
+    duplicate_count = sum(1 for r in records if r.get("download_status") == "skipped_duplicate")
 
     summary = {
         "status": "completed",
@@ -362,14 +505,27 @@ def main() -> None:
         "stock_code": raw_code,
         "periodic_count": len(periodic_items),
         "recent_count": len(recent_items),
+        "periodic_discovered": len(periodic_items),
+        "recent_discovered": len(recent_items),
         "after_dedup": len(records),
-        "download_success": sum(1 for s in statuses if s == "downloaded"),
-        "download_skipped_existing": sum(1 for s in statuses if s == "skipped_existing_source"),
-        "download_failed": sum(1 for s in statuses if s.startswith("download_failed") or s == "failed"),
-        "skipped_duplicate": sum(1 for s in statuses if s == "skipped_duplicate"),
-        "upload_success": sum(1 for s in upload_statuses if s in ("uploaded", "skipped_existing_source")),
-        "upload_failed": sum(1 for s in upload_statuses if s == "upload_failed"),
-        "upload_skipped_existing": sum(1 for s in upload_statuses if s == "skipped_existing_source"),
+        "excluded_count": excluded_count,
+        "duplicate_count": duplicate_count,
+        "download_success": sum(
+            1 for s in [r.get("download_status", "") for r in records] if s == "downloaded"
+        ),
+        "download_skipped_existing": sum(
+            1 for s in [r.get("download_status", "") for r in records] if s == "skipped_existing_source"
+        ),
+        "download_failed": sum(
+            1 for s in [r.get("download_status", "") for r in records]
+            if s.startswith("download_failed") or s == "failed"
+        ),
+        "skipped_duplicate": sum(
+            1 for s in [r.get("download_status", "") for r in records] if s == "skipped_duplicate"
+        ),
+        "upload_success": sum(1 for r in records if r.get("upload_status") in ("uploaded", "skipped_existing_source")),
+        "upload_failed": sum(1 for r in records if r.get("upload_status") == "upload_failed"),
+        "upload_skipped_existing": sum(1 for r in records if r.get("upload_status") == "skipped_existing_source"),
         "manifest_path": str(manifest_path),
         "pdf_dir": str(pdf_dir),
         "notebook_id": args.notebook_id,

@@ -1,0 +1,28 @@
+name: aidda-workbench
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - -r requirements-dev.txt
+      - notebooklm>=0.1.0
+      - requests>=2.31.0
+      - urllib3>=2.0.0
+      - botocore>=1.34.0
+      - beautifulsoup4>=4.12.0
+      - lxml>=4.9.0
+      - pandas>=2.0.0
+      - openpyxl>=3.1.0
+      - python-dotenv>=1.0.0
+      - selenium>=4.0.0
+      - webdriver-manager>=0.1.0
+      - click>=8.0.0
+
+# Required packages for running Python scripts
+environment_file: .env
+
+# Usage:
+#   conda env create -f environment.yml
+#   conda activate aidda-workbench

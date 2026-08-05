@@ -86,16 +86,6 @@ port_pids() {
   fi
 }
 
-check_port_free() {
-  local pids
-  pids="$(port_pids)"
-  if [[ -n "$pids" ]]; then
-    echo "ERROR: port $PORT is already in use by PID(s):"
-    echo "$pids"
-    echo "Stop that process first, or change PORT if server.ts is updated to honor it."
-    exit 1
-  fi
-}
 
 start_dev() {
   ensure_deps
@@ -286,10 +276,17 @@ check_data_dir() {
 }
 
 check_database() {
-  local db_path="$ROOT_DIR/data/aidda.db"
+  local db_path="$ROOT_DIR/data/aidda.sqlite"
   if [[ ! -f "$db_path" ]]; then
-    echo "Database file: MISSING"
-    return 1
+    # Also check if old db path exists for backward compatibility
+    db_path="$ROOT_DIR/data/aidda.db"
+    if [[ ! -f "$db_path" ]]; then
+      echo "Database file: MISSING"
+      return 1
+    fi
+    echo "Database file (legacy): $db_path"
+  else
+    echo "Database file: $db_path"
   fi
   if ! command -v sqlite3 >/dev/null 2>&1; then
     echo "Database: sqlite3 tool not available, skip integrity check"
@@ -315,13 +312,33 @@ check_database() {
 }
 
 check_api_health() {
-  local url="http://localhost:${PORT}/health"
+  local url="http://localhost:${PORT}/api/aidda/health"
   if ! curl -s -o /dev/null -w "%{http_code}" "$url" 2>/dev/null | grep -q "^2"; then
     echo "Health endpoint: UNREACHABLE (server not running?)"
     return 1
   fi
   echo "Health endpoint: REACHABLE"
   return 0
+}
+
+check_python_environment() {
+  echo "Python Environment:"
+  if command -v python3 >/dev/null 2>&1; then
+    local version
+    version=$(python3 --version)
+    echo "Python: $version"
+
+    # Check required packages
+    if python3 -c "import sys; import subprocess; result = subprocess.run([sys.executable, '-c', 'import scripts.source_mappings; print(\"source_mappings: OK\")'], capture_output=True, text=True); print(result.stdout.strip()); 2>/dev/null || echo "source_mappings: CHECK"; then
+      echo "  Python modules: available"
+    else
+      echo "  WARNING: Some Python modules may not be accessible"
+    fi
+  else
+    echo "ERROR: python3 is not installed"
+    return 1
+  fi
+  echo
 }
 
 doctor() {
@@ -332,6 +349,7 @@ doctor() {
   echo "Environment:"
   check_node_version
   check_npm_available
+  check_python_environment
   echo
   echo "Dependencies:"
   check_deps_installed

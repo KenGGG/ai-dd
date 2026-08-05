@@ -4,11 +4,49 @@ interface MarkdownRendererProps {
   content: string;
 }
 
+// Split content into blocks by blank lines, but keep fenced code blocks
+// (``` ... ```) intact so a code block containing a blank line is not torn apart.
+function splitIntoBlocks(text: string): string[] {
+  const blocks: string[] = [];
+  let buffer = "";
+  let inFence = false;
+  const lines = text.split("\n");
+  for (const line of lines) {
+    if (line.trim().startsWith("```")) {
+      if (!inFence) {
+        if (buffer.trim()) {
+          blocks.push(buffer);
+        }
+        inFence = true;
+        buffer = line;
+      } else {
+        buffer += "\n" + line;
+        blocks.push(buffer);
+        buffer = "";
+        inFence = false;
+      }
+      continue;
+    }
+    if (inFence) {
+      buffer += "\n" + line;
+    } else if (/^\s*$/.test(line)) {
+      if (buffer.trim()) {
+        blocks.push(buffer);
+        buffer = "";
+      }
+    } else {
+      buffer += buffer ? "\n" + line : line;
+    }
+  }
+  if (buffer.trim()) blocks.push(buffer);
+  return blocks;
+}
+
 export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
   if (!content) return null;
 
-  // Split content into blocks by double newlines
-  const blocks = content.split(/\n\s*\n/);
+  // Split content into blocks by double newlines (fenced code blocks kept intact)
+  const blocks = splitIntoBlocks(content);
 
   // Helper to render inline elements like bold, italic, and citation pills
   const renderInline = (text: string) => {
@@ -50,7 +88,62 @@ export default function MarkdownRenderer({ content }: MarkdownRendererProps) {
     }
     parts = processed;
 
-    // 2. Render Citation badges: [Page X] or [第 X 页] or [来源: xxx]
+    // 2. Render Links and Images: [label](url) and ![alt](url)
+    //    Done BEFORE citations so a markdown link keeps its URL instead of being
+    //    turned into a citation badge, and an image is rendered as <img>.
+    const linkRegex = /(!?)\[([^\]]+)\]\(([^)\s]+)\)/g;
+    const isSafeUrl = (url: string) =>
+      /^(https?:\/\/|mailto:|\/|#|data:image\/)/i.test(url);
+    processed = [];
+    for (const part of parts) {
+      if (typeof part === "string") {
+        let lastIndex = 0;
+        let match;
+        const subParts: (string | React.ReactNode)[] = [];
+        while ((match = linkRegex.exec(part)) !== null) {
+          const textBefore = part.substring(lastIndex, match.index);
+          if (textBefore) subParts.push(textBefore);
+          const isImage = match[1] === "!";
+          const label = match[2];
+          const url = match[3];
+          if (!isSafeUrl(url)) {
+            // Potentially unsafe (e.g. javascript:); keep as plain text.
+            subParts.push(part.substring(match.index, linkRegex.lastIndex));
+          } else if (isImage) {
+            subParts.push(
+              <img
+                key={`img-${match.index}`}
+                src={url}
+                alt={label}
+                className="max-w-full rounded my-2"
+              />,
+            );
+          } else {
+            subParts.push(
+              <a
+                key={`link-${match.index}`}
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 dark:text-blue-400 underline underline-offset-2 hover:text-blue-800"
+              >
+                {label}
+              </a>,
+            );
+          }
+          lastIndex = linkRegex.lastIndex;
+        }
+        const textAfter = part.substring(lastIndex);
+        if (textAfter) subParts.push(textAfter);
+        processed.push(...subParts);
+      } else {
+        processed.push(part);
+      }
+    }
+    parts = processed;
+
+    // 3. Render Citation badges: [Page X] or [第 X 页] or [来源: xxx]
+    //    Only bracketed text NOT consumed by the link/image pass above reaches here.
     const citationRegex = /\[([^\]]+)\]/g;
     processed = [];
     for (const part of parts) {

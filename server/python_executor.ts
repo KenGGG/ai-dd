@@ -8,7 +8,7 @@
  * - Heartbeat monitoring
  * - Log streaming
  */
-import { spawn, ChildProcess } from "child_process";
+import { spawn, ChildProcess, SpawnOptions } from "child_process";
 import fs from "fs";
 import path from "path";
 import { APP_CONFIG } from "./config.ts";
@@ -44,8 +44,15 @@ export interface PythonExecutionResult {
 }
 
 /**
- * PythonExecutor class manages the lifecycle of Python subprocesses.
+ * Command builder function for Python subprocess invocation.
+ * Allows custom command construction for testing without conda.
  */
+export type PythonCommandBuilder = (
+  scriptName: string,
+  args: string[],
+  includeDataDir: boolean,
+) => string[];
+
 class PythonExecutor {
   private activeProcesses = new Map<string, PythonProcessInfo>();
   private nextId = 0;
@@ -74,6 +81,10 @@ class PythonExecutor {
     }
     return ["conda", ...commandArgs];
   }
+
+  constructor(
+    private readonly commandBuilder: PythonCommandBuilder = PythonExecutor.buildCondaCommand,
+  ) {}
 
   /**
    * Start a heartbeat monitor for a Python process.
@@ -117,10 +128,11 @@ class PythonExecutor {
       includeDataDir = true,
       heartbeatInterval,
     } = options;
-    const timeoutMs =
-      timeoutOption !== undefined ? timeoutOption : APP_CONFIG.pythonTimeoutMs * 1000;
+
+    // Use timeout as configured (already in milliseconds from config)
+    const timeoutMs = timeoutOption ?? APP_CONFIG.pythonTimeoutMs;
     const id = `proc_${this.nextId++}`;
-    const cmd = PythonExecutor.buildCondaCommand(scriptName, args, includeDataDir);
+    const cmd = this.commandBuilder(scriptName, args, includeDataDir);
 
     // Check for cancellation before starting
     if (providedSignal?.aborted) {
@@ -139,18 +151,17 @@ class PythonExecutor {
     let stdout = "";
     let stderr = "";
     let exitCode: number | null = null;
-    let timedOut = false;
-    let cancelled = false;
 
     // Setup child process
-    const proc = spawn(cmd[0], cmd.slice(1), {
+    const spawnOptions: SpawnOptions = {
       cwd: process.cwd(),
       stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
         NODE_ENV: process.env.NODE_ENV || "development",
       },
-    });
+    };
+    const proc = spawn(cmd[0], cmd.slice(1), spawnOptions);
 
     const processInfo: PythonProcessInfo = {
       pid: proc.pid!,
@@ -176,138 +187,169 @@ class PythonExecutor {
       this.startHeartbeat(processInfo);
     }
 
-    let timeoutTimer: NodeJS.Timeout | null = null;
-    try {
-      // Stream stdout to both memory and log file if provided
-      proc.stdout?.on("data", (chunk: Buffer) => {
-        const text = chunk.toString();
-        stdout += text;
-        if (logPath) {
-          fs.appendFileSync(logPath, text, "utf-8");
-        }
-        // Update heartbeat on data arrival
-        processInfo.lastHeartbeat = Date.now();
-      });
+    let timeoutTimer: NodeJS.Timeout | undefined;
+    let forceKillTimer: NodeJS.Timeout | undefined;
+    let settled = false;
+    let requestedStopError: Error | null = null;
+    let requestedStopStatus: "timed_out" | "cancelled" | null = null;
 
-      proc.stderr?.on("data", (chunk: Buffer) => {
-        const text = chunk.toString();
-        stderr += text;
-        if (logPath) {
-          fs.appendFileSync(logPath, text, "utf-8");
-        }
-        // Update heartbeat on data arrival
-        processInfo.lastHeartbeat = Date.now();
-      });
-
-      proc.on("close", (code: number) => {
-        exitCode = code;
-        processInfo.endTime = Date.now();
-        processInfo.status = code === 0 ? "completed" : "failed";
-        this.activeProcesses.delete(id);
-        this.stopHeartbeat(processInfo);
-
-        if (code !== 0 && !timedOut && !cancelled) {
-          processInfo.reject(new Error(`Python script exited with code ${code}: ${stderr.trim()}`));
-        }
-      });
-
-      proc.on("error", (err: Error) => {
-        processInfo.endTime = Date.now();
-        processInfo.status = "failed";
-        this.activeProcesses.delete(id);
-        this.stopHeartbeat(processInfo);
-        processInfo.reject(err);
-      });
-
-      // Set up timeout timer
-      if (timeoutMs > 0) {
-        timeoutTimer = setTimeout(() => {
-          timedOut = true;
-          processInfo.status = "timed_out";
-          cancelled = true;
-
-          // Try to terminate the process
-          proc.kill("SIGTERM");
-
-          // Give it time to clean up
-          setTimeout(() => {
-            if (proc.exitCode === null && proc.killed === false) {
-              proc.kill("SIGKILL");
-            }
-            this.stopHeartbeat(processInfo);
-            processInfo.resolve({
-              pid: processInfo.pid,
-              stdout,
-              stderr,
-              exitCode: exitCode,
-              elapsedTimeMs: Date.now() - startTime,
-            });
-          }, 2000);
-
-          // Reject the promise with timeout error
-          processInfo.reject(new AppError(`Python script timed out after ${timeoutMs}ms`, 408));
-        }, timeoutMs);
-      }
-
-      // Set up signal-based cancellation
-      if (signal) {
-        signal.addEventListener("abort", () => {
-          if (!timedOut && proc.exitCode === null) {
-            cancelled = true;
-            processInfo.status = "cancelled";
-
-            proc.kill("SIGTERM");
-
-            setTimeout(() => {
-              if (proc.exitCode === null && proc.killed === false) {
-                proc.kill("SIGKILL");
-              }
-              this.stopHeartbeat(processInfo);
-              processInfo.resolve({
-                pid: processInfo.pid,
-                stdout,
-                stderr,
-                exitCode: exitCode,
-                elapsedTimeMs: Date.now() - startTime,
-              });
-            }, 2000);
-            processInfo.reject(new AppError("Operation was cancelled", 499));
-          }
-        });
-      }
-
-      // Return a promise that resolves/rejects via the processInfo callbacks
-      return new Promise((resolve, reject) => {
-        processInfo.resolve = resolve;
-        processInfo.reject = reject;
-
-        // If the process has already terminated by the time we set up the handlers
-        if (exitCode !== null) {
-          if (timeoutTimer) {
-            clearTimeout(timeoutTimer);
-            timeoutTimer = null;
-          }
-          if (exitCode === 0) {
-            resolve({
-              pid: processInfo.pid,
-              stdout,
-              stderr,
-              exitCode,
-              elapsedTimeMs: Date.now() - startTime,
-            });
-          } else {
-            reject(new Error(`Python script exited with code ${exitCode}: ${stderr}`));
-          }
-        }
-      });
-    } catch (err) {
-      if (timeoutTimer) {
-        clearTimeout(timeoutTimer);
-      }
+    const cleanup = () => {
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      signal?.removeEventListener("abort", onAbort);
       this.stopHeartbeat(processInfo);
       this.activeProcesses.delete(id);
-      throw err;
+    };
+
+    const finishResolve = (result: PythonExecutionResult) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      processInfo.resolve(result);
+    };
+
+    const finishReject = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      processInfo.reject(error);
+    };
+
+    const requestStop = (
+      status: "timed_out" | "cancelled",
+      error: Error,
+    ) => {
+      if (settled || requestedStopError) return;
+
+      requestedStopError = error;
+      requestedStopStatus = status;
+      processInfo.status = status;
+
+      if (proc.exitCode === null) {
+        proc.kill("SIGTERM");
+
+        forceKillTimer = setTimeout(() => {
+          if (proc.exitCode === null) {
+            proc.kill("SIGKILL");
+          }
+        }, 2000);
+      }
+    };
+
+    proc.once("close", (code) => {
+      exitCode = code;
+      processInfo.endTime = Date.now();
+
+      const result = {
+        pid: processInfo.pid,
+        stdout,
+        stderr,
+        exitCode: code,
+        elapsedTimeMs: Date.now() - startTime,
+      };
+
+      if (requestedStopError) {
+        processInfo.status = requestedStopStatus ?? "cancelled";
+        finishReject(requestedStopError);
+        return;
+      }
+
+      if (code === 0) {
+        processInfo.status = "completed";
+        finishResolve(result);
+      } else {
+        processInfo.status = "failed";
+        finishReject(
+          new Error(
+            `Python script exited with code ${code}: ${stderr.trim()}`,
+          ),
+        );
+      }
+    });
+
+    proc.once("error", (error) => {
+      processInfo.status = "failed";
+      finishReject(error);
+    });
+
+    const onAbort = () => {
+      requestStop(
+        "cancelled",
+        new AppError("Operation was cancelled", 499),
+      );
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+
+    if (timeoutMs > 0) {
+      timeoutTimer = setTimeout(() => {
+        requestStop(
+          "timed_out",
+          new AppError(
+            `Python script timed out after ${timeoutMs}ms`,
+            408,
+          ),
+        );
+      }, timeoutMs);
     }
+
+    // Stream stdout to both memory and log file if provided.
+    // In-memory buffers are capped to avoid unbounded growth (spawn has no maxBuffer).
+    const maxBuf = APP_CONFIG.pythonMaxBufferBytes;
+    proc.stdout?.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      if (stdout.length < maxBuf) {
+        stdout += text.slice(0, maxBuf - stdout.length);
+      }
+      if (processInfo) {
+        processInfo.lastHeartbeat = Date.now();
+      }
+      if (logPath) {
+        fs.appendFileSync(logPath, text, "utf-8");
+      }
+    });
+
+    proc.stderr?.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      if (stderr.length < maxBuf) {
+        stderr += text.slice(0, maxBuf - stderr.length);
+      }
+      if (processInfo) {
+        processInfo.lastHeartbeat = Date.now();
+      }
+      if (logPath) {
+        fs.appendFileSync(logPath, text, "utf-8");
+      }
+    });
+
+    // Return a promise that resolves/rejects via the process callbacks
+    return new Promise<PythonExecutionResult>((resolve, reject) => {
+      processInfo.resolve = resolve;
+      processInfo.reject = reject;
+
+      // If the process has already terminated by the time we set up the handlers
+      if (exitCode !== null) {
+        if (timeoutTimer) {
+          clearTimeout(timeoutTimer);
+          timeoutTimer = undefined;
+        }
+        if (exitCode === 0) {
+          finishResolve({
+            pid: processInfo.pid,
+            stdout,
+            stderr,
+            exitCode,
+            elapsedTimeMs: Date.now() - startTime,
+          });
+        } else {
+          finishReject(
+            new Error(
+              `Python script exited with code ${exitCode}: ${stderr}`,
+            ),
+          );
+        }
+      }
+    });
   }
 
   /**
@@ -338,11 +380,11 @@ class PythonExecutor {
   cancelProcess(id: string): boolean {
     const processInfo = this.activeProcesses.get(id);
     if (processInfo && processInfo.status === "running") {
-      // Signal cancellation
+      // Abort triggers onAbort -> requestStop("cancelled", ...) which records the
+      // stop error/status, so the close handler reports the correct final state.
       processInfo.abortController?.abort();
-      // Also send SIGTERM directly
+      // Also send SIGTERM directly as a fallback.
       processInfo.proc.kill("SIGTERM");
-      processInfo.status = "cancelled";
       this.stopHeartbeat(processInfo);
       return true;
     }

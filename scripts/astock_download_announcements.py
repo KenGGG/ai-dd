@@ -19,20 +19,12 @@ from typing import Any
 from .astock_utils import (
     cninfo_list_all,
     download_pdf,
+    get_report_date_range,
     is_not_full_report,
     is_periodic_report,
     normalize_stock_code,
-    safe_filename,
-    get_report_date_range,
 )
-
-
-def _validate_safe_path(base_dir: Path, requested: Path) -> Path:
-    """确保解析后的绝对路径仍在 base_dir 下"""
-    resolved = requested.resolve()
-    if not resolved.is_relative_to(base_dir.resolve()):
-        raise ValueError(f"路径穿越风险: {resolved} 不在 {base_dir} 下")
-    return resolved
+from .path_utils import _validate_safe_path
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +102,6 @@ def _download_announcement_pdf(
 def _write_manifest(manifest_path: Path, records: list[dict]) -> None:
     """原子写入 manifest JSONL"""
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    import tempfile
     tmp_path = manifest_path.with_suffix(".jsonl.tmp")
     try:
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
@@ -213,13 +204,15 @@ def download_announcements(
         base_dir = Path(__file__).resolve().parent.parent / "data"
 
     pdf_dir = _validate_safe_path(base_dir / "pdfs", base_dir / "pdfs" / project_id)
-    manifest_path = _validate_safe_path(base_dir / "manifests", base_dir / "manifests" / f"{project_id}_announcements.jsonl")
+    manifest_path = _validate_safe_path(
+        base_dir / "manifests", base_dir / "manifests" / f"{project_id}_announcements.jsonl"
+    )
 
     # skip_download 且已有 manifest → 快速返回
     if skip_download and manifest_path.exists():
         logger.info(f"skip_download 模式，复用已有 manifest: {manifest_path}")
         records = []
-        with open(manifest_path, "r", encoding="utf-8") as f:
+        with open(manifest_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
@@ -280,8 +273,8 @@ def download_announcements(
             try:
                 sha = hashlib.sha256(f.read_bytes()).hexdigest()
                 existing_pdfs[sha] = {"local_path": str(f)}
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"扫描已有 PDF 失败，跳过: {f}: {e}")
     logger.info(f"  已有本地 PDF: {len(existing_pdfs)} 个")
 
     # --- 下载第一层：定期报告 ---

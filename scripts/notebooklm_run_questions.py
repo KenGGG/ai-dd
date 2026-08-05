@@ -12,7 +12,6 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -37,7 +36,7 @@ def load_question_rounds(data_dir: str | None = None) -> list[dict]:
     path = templates_dir / "question_rounds.json"
     if not path.exists():
         raise FileNotFoundError(f"问题模板文件不存在: {path}")
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         rounds = json.load(f)
     return [r for r in rounds if r.get("enabled", True)]
 
@@ -89,7 +88,6 @@ def write_answers_manifest(
             })
 
     import tempfile
-    import shutil
 
     success_statuses = {"success", "skipped"}
     answers_manifest = {
@@ -124,7 +122,7 @@ def read_answers_manifest(answers_dir: Path) -> dict[str, Any]:
     if not manifest_path.exists():
         return {}
     try:
-        with open(manifest_path, "r", encoding="utf-8") as f:
+        with open(manifest_path, encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except Exception as e:
@@ -353,6 +351,7 @@ async def run_all_questions(
             previous_by_round_id=previous_by_round_id,
             source_ids=source_ids,
             force=force,
+            question_method=method,
             prompt_prefix=report_prompt_prefix,
         )
 
@@ -362,7 +361,7 @@ async def run_all_questions(
         round_name = round_data["round_name"]
         prompt = round_data["prompt"]
 
-        logger.info(f"  [{round_no}/{len(rounds)-1}] {round_name}...")
+        logger.info(f"  [{round_no}/{len(rounds)}] {round_name}...")
 
         # 检查是否已有答案（断点续跑）；问题模板变化时必须重新提问。
         answer_path = answers_dir / f"{round_id}.md"
@@ -374,7 +373,7 @@ async def run_all_questions(
             answer_path.unlink()
             logger.info(f"    已删除旧答案，准备重新提问: {answer_path}")
             # 当 force 时，强制清空该轮结果的 artifact_id/task_id，避免复用旧结果
-            previous_result = previous_by_round_id.get(round_id, {})
+            previous_result = {**previous_by_round_id.get(round_id, {})}
             if previous_result:
                 previous_result["artifact_id"] = ""
                 previous_result["task_id"] = ""
@@ -486,6 +485,7 @@ async def run_report_questions(
     previous_by_round_id: dict[str, dict],
     source_ids: list[str] | None,
     force: bool,
+    question_method: str,
     prompt_prefix: str,
 ) -> dict[str, Any]:
     """Submit report-generation questions quickly, then wait for the artifacts."""
@@ -520,11 +520,11 @@ async def run_report_questions(
                 answer_path.unlink()
                 logger.info(f"    已删除旧答案，准备重新提交报告生成: {answer_path}")
                 # 当 force 时，强制清空该轮结果的 artifact_id/task_id，避免复用旧结果
-                previous_result = previous_by_round_id.get(round_id, {})
+                previous_result = {**previous_by_round_id.get(round_id, {})}
                 if previous_result:
                     previous_result["artifact_id"] = ""
                     previous_result["task_id"] = ""
-                    previous_result["question_method"] = method
+                    previous_result["question_method"] = question_method
             elif answer_path.exists() and (not prompt_is_unchanged or previous_method != "report"):
                 answer_path.unlink()
                 logger.info(f"    检测到问题模板或问答方式已变更，删除旧答案: {answer_path}")
@@ -668,7 +668,6 @@ def run_questions(
     data_dir: str | None = None,
 ) -> dict[str, Any]:
     """同步执行的提问入口"""
-    from notebooklm import NotebookLMClient
 
     # 先检查登录
     try:

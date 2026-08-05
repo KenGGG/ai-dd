@@ -31,7 +31,7 @@ export async function runPythonScript(
 ): Promise<PythonRunResult> {
   const result = await pythonExecutor.execute(scriptName, args, {
     includeDataDir,
-    timeoutMs: timeoutMs || APP_CONFIG.pythonTimeoutMs,
+    timeoutMs: timeoutMs ?? APP_CONFIG.pythonTimeoutMs,
     signal,
   });
 
@@ -51,7 +51,7 @@ export async function runPythonScriptLogged(
 ): Promise<PythonRunResult> {
   const result = await pythonExecutor.execute(scriptName, args, {
     logPath,
-    timeoutMs: timeoutMs || APP_CONFIG.pythonTimeoutMs,
+    timeoutMs: timeoutMs ?? APP_CONFIG.pythonTimeoutMs,
     signal,
   });
 

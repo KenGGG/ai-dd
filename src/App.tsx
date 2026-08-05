@@ -1,4 +1,4 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -138,6 +138,10 @@ async function requestJSON<T>(url: string, options?: RequestInit): Promise<T> {
   return data as T;
 }
 
+// Polling limits for pollUntilDone
+const POLL_TIMEOUT_MS = 60 * 60 * 1000;
+const POLL_INTERVAL_MS = 3000;
+
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState("");
@@ -157,6 +161,7 @@ export default function App() {
   const [authMessage, setAuthMessage] = useState<{ text: string; kind: FeedbackKind } | null>(null);
   const [toast, setToast] = useState<{ text: string; kind: FeedbackKind } | null>(null);
   const [questions, setQuestions] = useState<QuestionRound[]>([]);
+  const pollCancelledRef = useRef(false);
 
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) || null,
@@ -233,6 +238,14 @@ export default function App() {
     void run();
     return () => {
       cancelled = true;
+    };
+  }, [activeProjectId]);
+
+  useEffect(() => {
+    // Cancel any in-flight poll when switching projects or unmounting so we
+    // don't keep fetching / calling setState after the user navigates away.
+    return () => {
+      pollCancelledRef.current = true;
     };
   }, [activeProjectId]);
 
@@ -343,28 +356,41 @@ export default function App() {
   }
 
   async function pollUntilDone(projectId: string) {
+    pollCancelledRef.current = false;
     const startedAt = Date.now();
-    while (Date.now() - startedAt < 60 * 60 * 1000) {
-      const data = await requestJSON<{ status: ProjectStatusPayload }>(
-        `/api/aidda/projects/${projectId}/status`,
-      );
-      const project = data.status.project;
-      setStatus(data.status);
-      setProjects((current) => current.map((item) => (item.id === project.id ? project : item)));
-      if (project.status === "completed") {
-        const reportData = await requestJSON<{ content: string }>(
-          `/api/aidda/projects/${projectId}/report`,
+    let pendingTimeout: ReturnType<typeof setTimeout> | null = null;
+    const sleep = () =>
+      new Promise<void>((resolve) => {
+        pendingTimeout = setTimeout(resolve, POLL_INTERVAL_MS);
+      });
+    try {
+      while (Date.now() - startedAt < POLL_TIMEOUT_MS) {
+        if (pollCancelledRef.current) return;
+        const data = await requestJSON<{ status: ProjectStatusPayload }>(
+          `/api/aidda/projects/${projectId}/status`,
         );
-        setReport(reportData.content || "");
-        setToast({ kind: "success", text: "尽调报告已生成。" });
-        return;
+        if (pollCancelledRef.current) return;
+        const project = data.status.project;
+        setStatus(data.status);
+        setProjects((current) => current.map((item) => (item.id === project.id ? project : item)));
+        if (project.status === "completed") {
+          const reportData = await requestJSON<{ content: string }>(
+            `/api/aidda/projects/${projectId}/report`,
+          );
+          if (pollCancelledRef.current) return;
+          setReport(reportData.content || "");
+          setToast({ kind: "success", text: "尽调报告已生成。" });
+          return;
+        }
+        if (project.status === "failed") {
+          throw new Error(project.error || "尽调任务失败");
+        }
+        await sleep();
       }
-      if (project.status === "failed") {
-        throw new Error(project.error || "尽调任务失败");
-      }
-      await new Promise((resolve) => setTimeout(resolve, 3000));
+      throw new Error("任务等待超时，请稍后刷新状态。");
+    } finally {
+      if (pendingTimeout) clearTimeout(pendingTimeout);
     }
-    throw new Error("任务等待超时，请稍后刷新状态。");
   }
 
   async function deleteActiveProject() {
@@ -402,8 +428,12 @@ export default function App() {
 
   async function copyReport() {
     if (!report) return;
-    await navigator.clipboard.writeText(report);
-    setToast({ kind: "success", text: "报告已复制。" });
+    try {
+      await navigator.clipboard.writeText(report);
+      setToast({ kind: "success", text: "报告已复制。" });
+    } catch {
+      setToast({ kind: "error", text: "复制失败，请检查浏览器剪贴板权限后重试。" });
+    }
   }
 
   function downloadReport() {
@@ -414,7 +444,8 @@ export default function App() {
     a.href = url;
     a.download = `${activeProject.stockCode || activeProject.id}_dd_report.md`;
     a.click();
-    URL.revokeObjectURL(url);
+    // Revoke asynchronously so the download isn't racing the revoke in some browsers.
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
   function updateQuestion(roundId: string, patch: Partial<QuestionRound>) {
@@ -586,7 +617,6 @@ export default function App() {
               <QuestionSettingsPanel
                 questions={questions}
                 selectedQuestion={selectedQuestion}
-                selectedQuestionId={selectedQuestionId}
                 isSavingQuestions={isSavingQuestions}
                 onSelectQuestion={setSelectedQuestionId}
                 onAddQuestion={addQuestion}
@@ -1165,7 +1195,6 @@ function QuestionSettingsPanel({
 }: {
   questions: QuestionRound[];
   selectedQuestion: QuestionRound | null;
-  selectedQuestionId: string;
   isSavingQuestions: boolean;
   onSelectQuestion: (roundId: string) => void;
   onAddQuestion: () => void;

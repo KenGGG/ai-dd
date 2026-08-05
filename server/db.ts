@@ -173,6 +173,16 @@ export interface SourceMappingRecord {
   updatedAt: string;
 }
 
+function safeParseJson<T>(value: unknown, fallback: T): T {
+  if (typeof value !== "string" || value.trim() === "") return fallback;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    console.warn("safeParseJson: corrupted JSON, using fallback");
+    return fallback;
+  }
+}
+
 function mapProject(row: any): AiddaProjectRecord {
   return {
     id: row.id,
@@ -189,7 +199,7 @@ function mapProject(row: any): AiddaProjectRecord {
     downloadSuccess: row.download_success || 0,
     uploadSuccess: row.upload_success || 0,
     error: row.error || "",
-    meta: JSON.parse(row.meta_json || "{}"),
+    meta: safeParseJson(row.meta_json, {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

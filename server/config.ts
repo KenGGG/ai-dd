@@ -27,5 +27,5 @@ export const APP_CONFIG = {
   dbPath: readPath("AIDDA_DB_PATH", path.join("data", "aidda.sqlite")),
   condaEnv: process.env.AIDDA_CONDA_ENV || "openclaw",
   pythonMaxBufferBytes: readNumber("AIDDA_PYTHON_MAX_BUFFER_MB", 50) * 1024 * 1024,
-  pythonTimeoutMs: readNumber("AIDDA_PYTHON_TIMEOUT_MS", 300),
+  pythonTimeoutMs: readNumber("AIDDA_PYTHON_TIMEOUT_MS", 300_000),
 };

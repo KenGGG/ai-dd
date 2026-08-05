@@ -19,7 +19,6 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 # 确保项目根目录在 Python 路径中
@@ -34,18 +33,18 @@ try:
         download_announcements,
         generate_project_id,
     )
-    from scripts.notebooklm_upload import run_upload
-    from scripts.notebooklm_run_questions import run_questions
     from scripts.compose_dd_report import compose_report
+    from scripts.notebooklm_run_questions import run_questions
+    from scripts.notebooklm_upload import run_upload
 except ImportError:
     # 作为模块直接运行时
     from astock_download_announcements import (
         download_announcements,
         generate_project_id,
     )
-    from notebooklm_upload import run_upload
-    from notebooklm_run_questions import run_questions
     from compose_dd_report import compose_report
+    from notebooklm_run_questions import run_questions
+    from notebooklm_upload import run_upload
 
 # ── 日志配置 ───────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -225,6 +224,7 @@ def parse_args() -> argparse.Namespace:
 def get_stock_name(code: str) -> str:
     """通过腾讯财经获取股票简称"""
     import urllib.request
+
     from scripts.astock_utils import normalize_stock_code
 
     raw = normalize_stock_code(code)
@@ -335,8 +335,16 @@ def main() -> None:
 
     manifest_path = download_result.get("manifest_path", "")
     if manifest_path and os.path.exists(manifest_path):
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            manifest_records = [json.loads(line) for line in f if line.strip()]
+        manifest_records = []
+        with open(manifest_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    manifest_records.append(json.loads(line))
+                except json.JSONDecodeError as e:
+                    logger.warning(f"manifest 行解析失败，已跳过: {e} | {line[:80]}")
 
     upload_result = {"status": "skipped"}
     if not args.skip_upload and manifest_records:

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { evaluateSourceCompleteness, SourceCompletenessInput } from "../server/routes/aidda.ts";
+import { evaluateSourceCompleteness, SourceCompletenessInput } from "../server/services/source-completeness.ts";
 
 // Scenario A: Filtering项不计入 required
 // Retrieve 200, filter out 20, unique required 180, 180 ready → complete

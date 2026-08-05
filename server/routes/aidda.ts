@@ -27,27 +27,60 @@ import {
 import { parseLastJSON, runPythonScript } from "../python.ts";
 import { runPythonScriptLogged } from "../python.ts";
 import { AppError, asyncHandler } from "../middleware/error-handler.ts";
-import { authMiddleware } from "../middleware/auth-middleware.ts";
+import { APP_CONFIG } from "../config.ts";
+import {
+  evaluateSourceCompleteness,
+  SourceCompletenessInput,
+  SourceCompletenessResult,
+} from "../services/source-completeness.ts";
 
 export const aiddaRouter = Router();
 
-// Health check endpoint (public)
-aiddaRouter.get(
-  "/health",
-  asyncHandler(async (_req: Request, res: Response) => {
-    res.json({
-      status: "healthy",
-      timestamp: new Date().toISOString(),
-      version: "0.1.0",
-      service: "aidda-workbench",
-    });
-  }),
-);
+// ── Path safety helpers ──────────────────────────────────────────────────────
+// Project IDs may originate from untrusted Python script output, so any path
+// built from them must be contained within DATA_DIR.
+const PROJECT_ID_RE = /^[A-Za-z0-9_-]+$/;
+
+function validateProjectId(id: string): string {
+  if (typeof id !== "string" || !PROJECT_ID_RE.test(id)) {
+    throw new AppError("非法的项目标识", 400);
+  }
+  return id;
+}
+
+// Resolve a path that must remain inside DATA_DIR; throws on any traversal
+// attempt (e.g. project id containing "..").
+function safeDataPath(...segments: string[]): string {
+  const dataRoot = path.resolve(DATA_DIR);
+  const target = path.resolve(DATA_DIR, ...segments);
+  if (target !== dataRoot && !target.startsWith(dataRoot + path.sep)) {
+    throw new AppError("非法的文件路径", 400);
+  }
+  return target;
+}
+
+// Parse a single JSONL line, returning null for blank or malformed lines.
+function safeParseJsonLine(line: string): Record<string, unknown> | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    console.warn("safeParseJsonLine: skipping malformed manifest line");
+    return null;
+  }
+}
+
+// ── Auth status endpoint (public) ────────────────────────────────────────────
+aiddaRouter.get("/auth/status", (_req: Request, res: Response) => {
+  res.json({ required: !!APP_CONFIG.authToken });
+});
+
+// ── Health check is handled in server.ts ────────────────────────────────────
 
 // Privacy endpoint - returns non-sensitive system information (authenticated)
 aiddaRouter.get(
   "/privacy",
-  authMiddleware,
   asyncHandler(async (_req: Request, res: Response) => {
     // Return only non-sensitive info - do NOT expose tokens, paths, or secrets
     res.json({
@@ -143,17 +176,21 @@ function attachAnswerContent(manifest: Record<string, unknown>) {
       if (!item || typeof item !== "object") return item;
       const result = item as Record<string, unknown>;
       const answerFile = typeof result.answer_file === "string" ? result.answer_file : "";
-      if (!answerFile || !fs.existsSync(answerFile)) return result;
+      if (!answerFile) return result;
+      // answer_file comes from untrusted script output — verify containment.
+      const resolvedAnswerFile = safeDataPath(answerFile);
+      if (!fs.existsSync(resolvedAnswerFile)) return result;
       return {
         ...result,
-        answer: fs.readFileSync(answerFile, "utf-8"),
+        answer: fs.readFileSync(resolvedAnswerFile, "utf-8"),
       };
     }),
   };
 }
 
 function countManifestRecords(projectId: string) {
-  const manifestPath = path.join(DATA_DIR, "manifests", `${projectId}_announcements.jsonl`);
+  validateProjectId(projectId);
+  const manifestPath = safeDataPath("manifests", `${projectId}_announcements.jsonl`);
   if (!fs.existsSync(manifestPath)) {
     return {
       manifestPath,
@@ -174,7 +211,8 @@ function countManifestRecords(projectId: string) {
     .trim()
     .split("\n")
     .filter(Boolean)
-    .map((line) => JSON.parse(line));
+    .map(safeParseJsonLine)
+    .filter((record): record is Record<string, unknown> => record !== null);
 
   const discovered = records.length;
   const excluded = records.filter((record) => record.download_status === "skipped_filter").length;
@@ -254,60 +292,16 @@ function toNumber(val: unknown, fallback: number = 0): number {
   return Number.isFinite(result) && result >= 0 ? result : fallback;
 }
 
-export interface SourceCompletenessInput {
-  periodicReady: number;
-  periodicExpected: number;
-  recentReady: number;
-  recentExpected: number;
-  failedCount: number;
-  recentLimit: number;
-}
-
-export interface SourceCompletenessResult {
-  complete: boolean;
-  hasPeriodic: boolean;
-  hasRecent: boolean;
-  noFailed: boolean;
-  message: string;
-  failedCount: number;
-}
-
-export function evaluateSourceCompleteness(
-  input: SourceCompletenessInput,
-): SourceCompletenessResult {
-  const { periodicReady, periodicExpected, recentReady, recentExpected, failedCount, recentLimit } =
-    input;
-
-  // When expected is 0, consider the check as trivially passed (nothing to verify)
-  const hasPeriodic = periodicExpected === 0 || periodicReady >= periodicExpected;
-  const hasRecent = recentLimit === 0 || (recentExpected > 0 && recentReady >= recentExpected);
-  const noFailed = failedCount === 0;
-  const complete = hasPeriodic && hasRecent && noFailed;
-
-  const parts: string[] = [];
-  if (periodicExpected > 0) parts.push(`periodic=${periodicReady}/${periodicExpected}`);
-  if (recentLimit > 0) parts.push(`recent=${recentReady}/${recentExpected}`);
-  if (failedCount > 0) parts.push(`failed=${failedCount}`);
-
-  return {
-    complete,
-    hasPeriodic,
-    hasRecent,
-    noFailed,
-    message: complete ? "来源完整性达标" : `来源完整性不达标：${parts.join(", ")}`,
-    failedCount,
-  };
-}
-
 function readManifestRows(projectId: string): Array<Record<string, any>> {
-  const manifestPath = path.join(DATA_DIR, "manifests", `${projectId}_announcements.jsonl`);
+  const manifestPath = safeDataPath("manifests", `${projectId}_announcements.jsonl`);
   if (!fs.existsSync(manifestPath)) return [];
   return fs
     .readFileSync(manifestPath, "utf-8")
     .trim()
     .split("\n")
     .filter(Boolean)
-    .map((line) => JSON.parse(line));
+    .map(safeParseJsonLine)
+    .filter((record): record is Record<string, unknown> => record !== null);
 }
 
 function hasSufficientSources(projectId: string, config: (typeof RUN_MODES)[RunMode]): boolean {
@@ -318,19 +312,37 @@ function hasSufficientSources(projectId: string, config: (typeof RUN_MODES)[RunM
         "SELECT meta_json FROM artifacts WHERE project_id = ? AND kind = 'source_snapshot' ORDER BY id DESC LIMIT 1",
       )
       .get(projectId) as { meta_json: string } | undefined;
+
     if (snapshot) {
-      const data = JSON.parse(snapshot.meta_json);
-      if (config.recentLimit > 0) {
-        return (
-          data.periodic_ready >= data.periodic_expected &&
-          data.recent_ready >= config.recentLimit &&
-          data.failed_count === 0
-        );
+      const data = safeParseJsonLine(snapshot.meta_json) ?? {};
+
+      // Validate snapshot fields match current expectations
+      // Use strict comparison for all critical fields
+      const expectedPeriodicYears = config.periodicYears;
+      const expectedRecentLimit = config.recentLimit;
+
+      // Compare periodic years - if different, reject snapshot
+      if ((data.periodic_years as number) !== expectedPeriodicYears) {
+        return false;
       }
-      return data.periodic_ready >= data.periodic_expected && data.failed_count === 0;
+
+      // Compare recent limit - if different, reject snapshot
+      if ((data.recent_limit as number) !== expectedRecentLimit) {
+        return false;
+      }
+
+      // Check source completeness
+      const hasPeriodic = (data.periodic_ready as number) >= (data.periodic_expected as number);
+      const hasRecent =
+        config.recentLimit === 0
+          ? true
+          : (data.recent_ready as number) >= (data.recent_expected as number);
+      const noFailed = (data.failed_count as number) === 0;
+
+      return hasPeriodic && hasRecent && noFailed;
     }
-  } catch {
-    // fall through to manifest-based check
+  } catch (e) {
+    // Snapshot parsing failed, fall through to manifest-based check
   }
 
   // Fallback: check manifest records (legacy path)
@@ -349,15 +361,18 @@ function hasSufficientSources(projectId: string, config: (typeof RUN_MODES)[RunM
 }
 
 function getReportPath(projectId: string) {
-  return path.join(DATA_DIR, "reports", `${projectId}_dd_report.md`);
+  validateProjectId(projectId);
+  return safeDataPath("reports", `${projectId}_dd_report.md`);
 }
 
 function getAnswersDir(projectId: string) {
-  return path.join(DATA_DIR, "answers", projectId);
+  validateProjectId(projectId);
+  return safeDataPath("answers", projectId);
 }
 
 function getRunLogPath(projectId: string) {
-  return path.join(DATA_DIR, "logs", `${projectId}_latest.log`);
+  validateProjectId(projectId);
+  return safeDataPath("logs", `${projectId}_latest.log`);
 }
 
 function resetRunArtifacts(projectId: string, restartQuestions: boolean) {
@@ -382,7 +397,7 @@ function readRunLog(projectId: string) {
 }
 
 function buildProjectStatus(project: NonNullable<ReturnType<typeof getProject>>) {
-  const answersDir = path.join(DATA_DIR, "answers", project.id);
+  const answersDir = safeDataPath("answers", project.id);
   const answersManifestPath = path.join(answersDir, "answers_manifest.json");
   const reportPath = getReportPath(project.id);
   const answersManifest = fs.existsSync(answersManifestPath) ? readJSON(answersManifestPath) : null;
@@ -471,13 +486,15 @@ aiddaRouter.put("/announcement-filters", (req: Request, res: Response) => {
 });
 
 aiddaRouter.get("/projects/:id/status", (req: Request, res: Response) => {
+  validateProjectId(req.params.id);
   const project = getProject(req.params.id);
   if (!project) throw new AppError("项目不存在", 404);
   res.json({ status: buildProjectStatus(project) });
 });
 
 aiddaRouter.get("/projects/:id/report", (req: Request, res: Response) => {
-  const reportPath = path.join(DATA_DIR, "reports", `${req.params.id}_dd_report.md`);
+  validateProjectId(req.params.id);
+  const reportPath = safeDataPath("reports", `${req.params.id}_dd_report.md`);
   if (!fs.existsSync(reportPath)) throw new AppError("报告不存在", 404);
   res.json({ content: fs.readFileSync(reportPath, "utf-8"), path: reportPath });
 });
@@ -487,21 +504,22 @@ aiddaRouter.get("/projects/:id/report", (req: Request, res: Response) => {
  * 只允许在 DATA_DIR 下的指定子目录操作，防止路径穿越。
  */
 function cleanProjectFiles(projectId: string): boolean {
-  const baseDir = path.resolve(DATA_DIR);
+  validateProjectId(projectId);
+  const dataRoot = path.resolve(DATA_DIR);
   const dirsToClean = [
-    path.join(baseDir, "pdfs", projectId),
-    path.join(baseDir, "manifests", `${projectId}_announcements.jsonl`),
-    path.join(baseDir, "answers", projectId),
-    path.join(baseDir, "reports", `${projectId}_dd_report.md`),
-    path.join(baseDir, "logs", `${projectId}_latest.log`),
+    safeDataPath("pdfs", projectId),
+    safeDataPath("manifests", `${projectId}_announcements.jsonl`),
+    safeDataPath("answers", projectId),
+    safeDataPath("reports", `${projectId}_dd_report.md`),
+    safeDataPath("logs", `${projectId}_latest.log`),
   ];
 
   let allSucceeded = true;
   for (const dir of dirsToClean) {
     try {
       const realPath = path.resolve(dir);
-      // 确保清理目标在 DATA_DIR 下
-      if (!realPath.startsWith(baseDir)) {
+      // 确保清理目标在 DATA_DIR 下（防御性校验）
+      if (realPath !== dataRoot && !realPath.startsWith(dataRoot + path.sep)) {
         console.warn(`跳过路径穿透检查: ${dir} for project ${projectId}`);
         continue;
       }
@@ -522,6 +540,7 @@ function cleanProjectFiles(projectId: string): boolean {
 }
 
 aiddaRouter.delete("/projects/:id", (req: Request, res: Response) => {
+  validateProjectId(req.params.id);
   const projectId = req.params.id;
   const deleteFiles = req.query.deleteFiles === "true"; // 支持 ?deleteFiles=true 清理本地文件
 
@@ -586,8 +605,10 @@ aiddaRouter.post(
     const payload = parseLastJSON(stdout);
     if (!payload) throw new AppError("项目创建输出无法解析", 500, "PARSE_ERROR");
 
+    const projectId = typeof payload.project_id === "string" ? payload.project_id : "";
+    validateProjectId(projectId);
     const project = upsertProject({
-      id: payload.project_id as string,
+      id: projectId,
       name: payload.project_name as string,
       stockCode: payload.stock_code as string,
       stockName: payload.stock_name as string,
@@ -606,6 +627,7 @@ aiddaRouter.post(
 );
 
 aiddaRouter.post("/projects/:id/run", (req: Request, res: Response) => {
+  validateProjectId(req.params.id);
   const project = getProject(req.params.id);
   if (!project) throw new AppError("项目不存在", 404);
   if (!project.stockCode || !project.notebookId) {
@@ -651,6 +673,7 @@ aiddaRouter.post("/projects/:id/run", (req: Request, res: Response) => {
 });
 
 aiddaRouter.post("/projects/:id/question-rounds/:roundId/retry", (req: Request, res: Response) => {
+  validateProjectId(req.params.id);
   const project = getProject(req.params.id);
   if (!project) throw new AppError("项目不存在", 404);
   if (!project.stockCode || !project.notebookId) {
@@ -727,8 +750,8 @@ aiddaRouter.get(
 
 aiddaRouter.get(
   "/projects/:id/source-mappings",
-  authMiddleware,
   asyncHandler(async (req: Request, res: Response) => {
+    validateProjectId(req.params.id);
     const project = getProject(req.params.id);
     if (!project) throw new AppError("项目不存在", 404);
 
@@ -739,8 +762,8 @@ aiddaRouter.get(
 
 aiddaRouter.get(
   "/projects/:id/source-mappings/count",
-  authMiddleware,
   asyncHandler(async (req: Request, res: Response) => {
+    validateProjectId(req.params.id);
     const project = getProject(req.params.id);
     if (!project) throw new AppError("项目不存在", 404);
 
@@ -793,6 +816,14 @@ async function runDueDiligence(
       logPath,
     );
     downloadSummary = parseLastJSON(download.stdout);
+
+    if (!downloadSummary) {
+      throw new AppError(
+        "公告下载脚本未返回有效 JSON 摘要",
+        500,
+        "DOWNLOAD_SUMMARY_INVALID",
+      );
+    }
   }
 
   const sourceStats = countManifestRecords(project.id);
@@ -801,12 +832,12 @@ async function runDueDiligence(
     currentStep: 2,
     manifestPath:
       typeof downloadSummary?.manifest_path === "string"
-        ? downloadSummary.manifest_path
-        : path.join(DATA_DIR, "manifests/" + project.id + "_announcements.jsonl"),
+        ? safeDataPath(downloadSummary.manifest_path)
+        : safeDataPath("manifests", `${project.id}_announcements.jsonl`),
     pdfDir:
       typeof downloadSummary?.pdf_dir === "string"
-        ? downloadSummary.pdf_dir
-        : path.join(DATA_DIR, "pdfs/" + project.id),
+        ? safeDataPath(downloadSummary.pdf_dir)
+        : safeDataPath("pdfs", project.id),
     downloadSuccess:
       typeof downloadSummary?.download_success === "number"
         ? downloadSummary.download_success
@@ -838,7 +869,7 @@ async function runDueDiligence(
         )
         .get(project.id) as { meta_json: string } | undefined;
       if (snap) {
-        const data = JSON.parse(snap.meta_json);
+        const data = safeParseJsonLine(snap.meta_json) ?? {};
         periodicReady = toNumber(data.periodic_ready ?? 0);
         periodicExpected = toNumber(data.periodic_expected ?? 0);
         recentReady = toNumber(data.recent_ready ?? 0);
