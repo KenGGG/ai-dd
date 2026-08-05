@@ -16,6 +16,7 @@ data/manifests/*
 data/notebooklm/*
 data/pdfs/*
 data/projects/*
+data/Projects/*
 data/reports/*
 !data/answers/.gitkeep
 !data/backups/.gitkeep
@@ -24,6 +25,7 @@ data/reports/*
 !data/notebooklm/.gitkeep
 !data/pdfs/.gitkeep
 !data/projects/.gitkeep
+!data/Projects/.gitkeep
 !data/reports/.gitkeep
 
 scripts/__pycache__/
